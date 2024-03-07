@@ -1,0 +1,9 @@
+requests
+tda-api
+selenium
+datetime
+requests
+matplotlib
+pytz
+schedule
+numpy
