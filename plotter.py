@@ -26,17 +26,27 @@ class RealTimeGammaPlotter:
         strikes_str = [str(strike) for strike in strikes]
 
         self.ax_gamma.bar(strikes_str, gamma_exposures, color='skyblue', label='Current Gamma Exposure')
+        self.ax_gamma.set_xticklabels(strikes_str, rotation='vertical')  # Set x-axis labels to vertical
         self.ax_gamma.legend()
         plt.draw()
 
-    def update_plot_change_in_gamma(self, change_in_gamma_per_strike):
+    def update_plot_change_in_gamma(self, change_in_gamma_per_strike, largest_changes):
         self.init_plot_change_in_gamma()
 
         strikes = list(change_in_gamma_per_strike.keys())
         changes_in_gamma = [change_in_gamma_per_strike[strike] for strike in strikes]
         strikes_str = [str(strike) for strike in strikes]
 
-        self.ax_change_in_gamma.bar(strikes_str, changes_in_gamma, color='red', label='Change in Gamma')
+        self.ax_change_in_gamma.bar(strikes_str, changes_in_gamma, color='lightgrey', label='Change in Gamma')
+
+        if largest_changes:  # Highlight the top 5 changes
+            for top_strike, top_change in largest_changes:
+                if str(top_strike) in strikes_str:
+                    index = strikes_str.index(str(top_strike))
+                    self.ax_change_in_gamma.patches[index].set_facecolor('red')  # Change color for top 5 changes
+                    self.ax_change_in_gamma.text(top_strike, top_change, f'{top_change:.2f}', color='black', ha='center', va='bottom')
+
+        self.ax_change_in_gamma.set_xticklabels(strikes_str, rotation='vertical')  # Set x-axis labels to vertical
         self.ax_change_in_gamma.legend()
         plt.draw()
 
