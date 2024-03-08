@@ -2,9 +2,8 @@ import matplotlib.pyplot as plt
 
 class RealTimeGammaPlotter:
     def __init__(self):
-        # Set up for gamma exposure plot
+        plt.ion()  # Turn on interactive mode
         self.fig_gamma, self.ax_gamma = plt.subplots(figsize=(14, 8))
-        # Set up for change in gamma plot
         self.fig_change_in_gamma, self.ax_change_in_gamma = plt.subplots(figsize=(14, 8))
 
     def init_plot_gamma(self):

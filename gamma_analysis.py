@@ -16,11 +16,9 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
 
             # Calculate the delta in gamma exposure if previous data is available
             if previous_gamma_exposure and strike in previous_gamma_exposure:
-                change_in_gamma_per_strike[strike] = gamma_exposure - previous_gamma_exposure[strike]
-            else:
-                change_in_gamma_per_strike[strike] = gamma_exposure
+                change = gamma_exposure - previous_gamma_exposure.get(strike, 0)
+                change_in_gamma_per_strike[strike] = change
 
-        print("Processing calls...")
         for expiration_date in data['callExpDateMap']:
             for strike, options in data['callExpDateMap'][expiration_date].items():
                 for option in options:
@@ -29,7 +27,6 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
                     call_exposure = spot_price * gamma * volume * contract_size * spot_price * 0.01
                     add_gamma_exposure(strike, call_exposure)
 
-        print("Processing puts...")
         for expiration_date in data['putExpDateMap']:
             for strike, options in data['putExpDateMap'][expiration_date].items():
                 for option in options:
@@ -39,8 +36,14 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
                     add_gamma_exposure(strike, put_exposure)
 
         total_gamma_exposure = sum(per_strike_gamma_exposure.values())
-        print("Total gamma exposure calculated successfully.")
         
+        # After calculating changes for all strikes, sort by the absolute value of changes and get top 5
+        largest_changes = sorted(change_in_gamma_per_strike.items(), key=lambda item: abs(item[1]), reverse=True)[:5]
+
+        print("Largest 5 Changes in Gamma Exposure Per Strike:")
+        for strike, change in largest_changes:
+            print(f"Strike {strike}: Change {change}")
+
     else:
         print("Data missing expected keys or invalid spot price. Check data format.")
 
@@ -48,4 +51,4 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
     for strike, exposure in per_strike_gamma_exposure.items():
         print(f"Strike {strike}: {exposure}")
 
-    return total_gamma_exposure, per_strike_gamma_exposure, change_in_gamma_per_strike
+    return total_gamma_exposure, per_strike_gamma_exposure, change_in_gamma_per_strike, largest_changes
