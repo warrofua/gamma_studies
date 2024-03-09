@@ -7,6 +7,7 @@ from plotter import RealTimeGammaPlotter
 import matplotlib.pyplot as plt
 from selenium import webdriver
 import time as time_module
+from db_storage import store_raw_options_data
 
 class GammaExposureScheduler:
     def __init__(self):
@@ -47,6 +48,15 @@ class GammaExposureScheduler:
                 self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
                 self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)  # Pass spot_price here
                 self.plotter.show_plots()
+                
+                # Store raw JSON data in the database
+                db_params = {
+                    "dbname": "your_dbname",
+                    "user": "your_username",
+                    "password": "your_password",
+                    "host": "localhost"  # or your database host
+                }
+                store_raw_options_data(db_params, data, now)
                 plt.pause(14)
             else:
                 print(f"Failed to fetch data: {r.status_code}")
