@@ -39,11 +39,14 @@ class GammaExposureScheduler:
             r = self.client.get_option_chain(symbol='$SPX.X', contract_type=self.client.Options.ContractType.ALL, from_date=use_date, to_date=use_date, strike_count=30)
             if r.status_code == 200:
                 data = r.json()
-                total_gamma_exposure, self.current_gamma_exposure, self.change_in_gamma_per_strike, largest_changes = calculate_gamma_exposure(data, self.previous_gamma_exposure)
+                # Adjust this line to capture the spot_price returned by calculate_gamma_exposure
+                total_gamma_exposure, self.current_gamma_exposure, self.change_in_gamma_per_strike, largest_changes, spot_price = calculate_gamma_exposure(data, self.previous_gamma_exposure)
                 self.previous_gamma_exposure = self.current_gamma_exposure.copy()
+                current_timestamp = datetime.now(pytz.timezone('US/Eastern'))  # Ensure the timestamp is timezone-aware
                 self.plotter.update_plot_gamma(self.current_gamma_exposure)
                 self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
-                self.plotter.show_plots() 
+                self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)  # Pass spot_price here
+                self.plotter.show_plots()
                 plt.pause(14)
             else:
                 print(f"Failed to fetch data: {r.status_code}")
