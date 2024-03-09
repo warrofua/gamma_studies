@@ -1,10 +1,14 @@
+import datetime
+
 def calculate_gamma_exposure(data, previous_gamma_exposure=None):
     per_strike_gamma_exposure = {}  # Dictionary to store gamma exposure per strike
     change_in_gamma_per_strike = {}  # Dictionary to store the change in gamma exposure per strike
+    time_of_change_per_strike = {}  # Dictionary to store the time of change per strike
     total_gamma_exposure = 0
     contract_size = 100  # Standard contract size for US options
     spot_price = data.get('underlyingPrice', 0)  # Safely get spot price
-    
+    calculation_time = datetime.datetime.now()  # Capture the current time
+
     print("Spot price:", spot_price)
 
     if 'callExpDateMap' in data and 'putExpDateMap' in data and spot_price != 0:
@@ -14,10 +18,11 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
             else:
                 per_strike_gamma_exposure[strike] = gamma_exposure
 
-            # Calculate the delta in gamma exposure if previous data is available
+            # Calculate the change in gamma exposure if previous data is available
             if previous_gamma_exposure and strike in previous_gamma_exposure:
                 change = gamma_exposure - previous_gamma_exposure.get(strike, 0)
                 change_in_gamma_per_strike[strike] = change
+                time_of_change_per_strike[strike] = calculation_time
 
         for expiration_date in data['callExpDateMap']:
             for strike, options in data['callExpDateMap'][expiration_date].items():
@@ -37,12 +42,16 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
 
         total_gamma_exposure = sum(per_strike_gamma_exposure.values())
         
-        # After calculating changes for all strikes, sort by the absolute value of changes and get top 5
-        largest_changes = sorted(change_in_gamma_per_strike.items(), key=lambda item: abs(item[1]), reverse=True)[:5]
+        # Sort by the absolute value of changes and get top 5, including the time of change
+        largest_changes_with_time = sorted(change_in_gamma_per_strike.items(), 
+                                           key=lambda item: abs(item[1]), 
+                                           reverse=True)[:5]
+        largest_changes = [(strike, change, time_of_change_per_strike[strike].strftime("%Y-%m-%d %H:%M:%S")) 
+                           for strike, change in largest_changes_with_time]
 
         print("Largest 5 Changes in Gamma Exposure Per Strike:")
-        for strike, change in largest_changes:
-            print(f"Strike {strike}: Change {change}")
+        for strike, change, change_time in largest_changes:
+            print(f"Strike {strike}: Change {change}, Time of Change: {change_time}")
 
     else:
         print("Data missing expected keys or invalid spot price. Check data format.")
