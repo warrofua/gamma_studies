@@ -30,8 +30,7 @@ class GammaExposureScheduler:
 
         if now.weekday() == 4 and now.hour >= 16:
             # If it's Friday after 4 PM, set use_date to the next Monday
-            days_until_monday = (7 - now.weekday()) % 7 + 3
-            use_date = (now + timedelta(days=days_until_monday)).date()
+            use_date = (now + timedelta(days=3)).date()
         else:
             # Otherwise, use the next day's date if it's after 4 PM, or today's date if it's before 4 PM
             use_date = now.date() + timedelta(days=1 if now.hour >= 16 else 0)
@@ -48,7 +47,7 @@ class GammaExposureScheduler:
                 self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
                 self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)  # Pass spot_price here
                 self.plotter.show_plots()
-                
+
                 # Store raw JSON data in the database
                 db_params = {
                     "dbname": "your_dbname",
