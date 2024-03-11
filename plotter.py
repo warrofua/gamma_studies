@@ -25,7 +25,7 @@ class RealTimeGammaPlotter:
         self.ax[1].clear()
         self.ax[1].set_title('')
         self.ax[1].set_xlabel('')
-        self.ax[1].set_ylabel('Change in Gamma')
+        self.ax[1].set_ylabel('Change in Gamma Exposure')
 
         self.ax[2].clear()
         self.ax[2].set_title('')

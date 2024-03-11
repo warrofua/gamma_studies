@@ -10,20 +10,11 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
     calculation_time = datetime.datetime.now()
 
     def add_gamma_exposure(option_type, strike, gamma, volume):
-        gamma_exposure = spot_price * gamma * volume * contract_size * spot_price * 0.01
-        strike = float(strike)
-
         if option_type == 'call':
-            if strike > spot_price:  # OTM
-                gamma_exposure = abs(gamma_exposure)  # Positive gamma as delta increases when approaching the strike
-            elif strike < spot_price:  # ITM
-                gamma_exposure = -abs(gamma_exposure)  # Negative gamma as adjustments become significant
-                
-        elif option_type == 'put':
-            if strike < spot_price:  # OTM
-                gamma_exposure = -abs(gamma_exposure)  # Negative gamma as delta increases when approaching the strike
-            elif strike > spot_price:  # ITM
-                gamma_exposure = abs(gamma_exposure)  # Positive gamma as adjustments become significant
+            gamma_exposure = spot_price * gamma * volume * contract_size * spot_price * 0.01
+        if option_type =='put':
+            gamma_exposure = -spot_price * gamma * volume * contract_size * spot_price * 0.01
+        strike = float(strike)
         
         if strike in per_strike_gamma_exposure:
             per_strike_gamma_exposure[strike] += gamma_exposure
@@ -31,7 +22,7 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
             per_strike_gamma_exposure[strike] = gamma_exposure
 
         if strike in previous_gamma_exposure:
-            change = gamma_exposure - previous_gamma_exposure.get(strike, 0)
+            change = gamma_exposure + previous_gamma_exposure.get(strike, 0)
             change_in_gamma_per_strike[strike] = change
             time_of_change_per_strike[strike] = calculation_time
 
