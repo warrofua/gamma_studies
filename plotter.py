@@ -19,23 +19,20 @@ class RealTimeGammaPlotter:
     def init_plots(self):
         self.ax[0].clear()
         self.ax[0].set_title('Per Strike Gamma Exposure')
-        self.ax[0].set_xlabel('Strike Price')
+        self.ax[0].set_xlabel('')
         self.ax[0].set_ylabel('Gamma Exposure')
 
         self.ax[1].clear()
-        self.ax[1].set_title('Change in Gamma Exposure Per Strike')
-        self.ax[1].set_xlabel('Strike Price')
+        self.ax[1].set_title('')
+        self.ax[1].set_xlabel('')
         self.ax[1].set_ylabel('Change in Gamma')
 
         self.ax[2].clear()
-        self.ax[2].set_title('Total Gamma Exposure Over Time')
+        self.ax[2].set_title('')
         self.ax[2].set_xlabel('Time')
         self.ax[2].set_ylabel('Total Gamma Exposure', color='blue')
         self.ax2.clear()
         self.ax2.set_ylabel('SPX Spot Price ($)', color='green')
-
-        # Ensure the tick labels don't overlap
-        self.fig.autofmt_xdate()
 
     def update_plot_gamma(self, current_gamma_exposure):
         self.init_plots()
