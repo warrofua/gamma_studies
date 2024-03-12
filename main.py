@@ -48,14 +48,14 @@ class GammaExposureScheduler:
                 self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)  # Pass spot_price here
                 self.plotter.show_plots()
 
-                # Store raw JSON data in the database
-                #db_params = {
-                    #"dbname": "your_dbname",
-                    #"user": "your_username",
-                    #"password": "your_password",
-                    #"host": "localhost"  # or your database host
-                #}
-                #store_raw_options_data(db_params, data, now)
+                #Store raw JSON data in postgresql database
+                db_params = {
+                    "dbname": "spx_options_data",
+                    "user": "postgres",
+                    "password": "password",
+                    "host": "localhost"
+                }
+                store_raw_options_data(db_params, data, now)
                 plt.pause(14)
             else:
                 print(f"Failed to fetch data: {r.status_code}")

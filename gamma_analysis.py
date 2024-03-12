@@ -37,7 +37,9 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
                 add_gamma_exposure('put', strike, option['gamma'], option['totalVolume'])
 
     total_gamma_exposure = sum(per_strike_gamma_exposure.values())
+    print(total_gamma_exposure)
     largest_changes_with_time = sorted(change_in_gamma_per_strike.items(), key=lambda item: abs(item[1]), reverse=True)[:5]
     largest_changes = [(strike, change, time_of_change_per_strike[strike].strftime("%Y-%m-%d %H:%M:%S")) for strike, change in largest_changes_with_time]
+    print(largest_changes)
 
     return total_gamma_exposure, per_strike_gamma_exposure, change_in_gamma_per_strike, largest_changes, spot_price
