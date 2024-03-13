@@ -11,9 +11,9 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
 
     def add_gamma_exposure(option_type, strike, gamma, volume):
         if option_type == 'call':
-            gamma_exposure = spot_price * gamma * volume * contract_size * spot_price * 0.01
+            gamma_exposure = (spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
         if option_type =='put':
-            gamma_exposure = -spot_price * gamma * volume * contract_size * spot_price * 0.01
+            gamma_exposure = (-spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
         strike = float(strike)
         
         if strike in per_strike_gamma_exposure:
