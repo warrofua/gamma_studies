@@ -41,7 +41,7 @@ class RealTimeGammaPlotter:
         gamma_exposures = [current_gamma_exposure[strike] for strike in strikes]
         strikes_str = [str(strike) for strike in strikes]
 
-        self.ax[0].bar(strikes_str, gamma_exposures, color='skyblue', label='Current Gamma Exposure')
+        self.ax[0].bar(strikes_str, gamma_exposures, color='skyblue', label='Current Gamma Exposure ($Bn)')
         self.ax[0].tick_params(axis='x', rotation=90)  # Rotate x-axis labels for better readability
         self.ax[0].legend()
 
@@ -50,7 +50,7 @@ class RealTimeGammaPlotter:
         changes_in_gamma = [change_in_gamma_per_strike[strike] for strike in strikes]
         strikes_str = [str(strike) for strike in strikes]
 
-        self.ax[1].bar(strikes_str, changes_in_gamma, color='lightgrey', label='Change in Gamma')
+        self.ax[1].bar(strikes_str, changes_in_gamma, color='lightgrey', label='Change in Gamma ($Bn)')
 
         # Annotate largest changes
         for top_strike, top_change, _ in largest_changes:  # Assume largest_changes includes the time as a third element now
@@ -68,7 +68,7 @@ class RealTimeGammaPlotter:
         self.spot_prices.append(spot_price)
 
         # Plot total gamma exposure on the primary y-axis of the third plot
-        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure')
+        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure ($Bn)')
         self.ax[2].legend(loc='upper left')
         self.ax[2].tick_params(axis='y', labelcolor='blue')
 
