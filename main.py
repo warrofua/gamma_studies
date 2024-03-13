@@ -28,11 +28,11 @@ class GammaExposureScheduler:
         eastern = pytz.timezone('US/Eastern')
         now = datetime.now(eastern)
 
+        # If it's Friday after 4 PM, set use_date to the next Monday
         if now.weekday() == 4 and now.hour >= 16:
-            # If it's Friday after 4 PM, set use_date to the next Monday
             use_date = (now + timedelta(days=3)).date()
+        # Otherwise, use the next day's date if it's after 4 PM, or today's date if it's before 4 PM
         else:
-            # Otherwise, use the next day's date if it's after 4 PM, or today's date if it's before 4 PM
             use_date = now.date() + timedelta(days=1 if now.hour >= 16 else 0)
 
         if self.client:

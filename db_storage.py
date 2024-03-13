@@ -2,7 +2,6 @@ import psycopg2
 import json
 
 def store_raw_options_data(db_params, data, now):
-    import psycopg2
     try:
         # Connect to the PostgreSQL database
         conn = psycopg2.connect(**db_params)

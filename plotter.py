@@ -67,6 +67,11 @@ class RealTimeGammaPlotter:
         self.total_gamma_exposures.append(total_gamma_exposure)
         self.spot_prices.append(spot_price)
 
+        # Plot total gamma exposure on the primary y-axis of the third plot
+        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure')
+        self.ax[2].legend(loc='upper left')
+        self.ax[2].tick_params(axis='y', labelcolor='blue')
+
         # Plot spot price on the secondary y-axis
         self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-', label='SPX Spot Price')
         self.ax2.legend(loc='upper right')
