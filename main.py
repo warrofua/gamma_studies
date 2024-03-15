@@ -35,30 +35,40 @@ class GammaExposureScheduler:
         else:
             use_date = now.date() + timedelta(days=1 if now.hour >= 16 else 0)
 
-        if self.client:
-            r = self.client.get_option_chain(symbol='$SPX.X', contract_type=self.client.Options.ContractType.ALL, from_date=use_date, to_date=use_date, strike_count=30)
-            if r.status_code == 200:
-                data = r.json()
-                # Adjust this line to capture the spot_price returned by calculate_gamma_exposure
-                total_gamma_exposure, self.current_gamma_exposure, self.change_in_gamma_per_strike, largest_changes, spot_price = calculate_gamma_exposure(data, self.previous_gamma_exposure)
-                self.previous_gamma_exposure = self.current_gamma_exposure.copy()
-                current_timestamp = datetime.now(pytz.timezone('US/Eastern'))  # Ensure the timestamp is timezone-aware
-                self.plotter.update_plot_gamma(self.current_gamma_exposure)
-                self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
-                self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)  # Pass spot_price here
-                self.plotter.show_plots()
-
-                #Store raw JSON data in postgresql database
-                db_params = {
-                    "dbname": "spx_options_data",
-                    "user": "postgres",
-                    "password": "password",
-                    "host": "localhost"
-                }
+        try:
+            if self.client:
+                r = self.client.get_option_chain(symbol='$SPX.X', contract_type=self.client.Options.ContractType.ALL, from_date=use_date, to_date=use_date, strike_count=30)
+                if r.status_code == 200:
+                    data = r.json()
+                    total_gamma_exposure, self.current_gamma_exposure, self.change_in_gamma_per_strike, largest_changes, spot_price = calculate_gamma_exposure(data, self.previous_gamma_exposure)
+                    self.previous_gamma_exposure = self.current_gamma_exposure.copy()
+                    current_timestamp = datetime.now(pytz.timezone('US/Eastern'))
+                    self.plotter.update_plot_gamma(self.current_gamma_exposure)
+                    self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
+                    self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)
+                    self.plotter.show_plots()
+                    pause_duration = 14
+                else:
+                    print(f"Failed to fetch data: {r.status_code}")
+                    pause_duration = 14  # Longer pause when fetch fails
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            pause_duration = 14  # Longer pause on error
+        finally:
+            # Always attempt to store data in the database, even if the fetch or plotting fails
+            db_params = {
+                "dbname": "spx_options_data",
+                "user": "postgres",
+                "password": "password",
+                "host": "localhost"
+            }
+            # Make sure to handle the case where data might not be defined due to failed fetch
+            if 'data' in locals():
                 store_raw_options_data(db_params, data, now)
-                plt.pause(14)
             else:
-                print(f"Failed to fetch data: {r.status_code}")
+                print("No data to store in database.")
+
+            plt.pause(pause_duration)  # Adjust pause based on operation outcome
 
     def run(self):
         self.authenticate()

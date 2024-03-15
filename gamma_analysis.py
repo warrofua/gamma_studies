@@ -10,21 +10,26 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
     calculation_time = datetime.datetime.now()
 
     def add_gamma_exposure(option_type, strike, gamma, volume):
-        if option_type == 'call':
-            gamma_exposure = (spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
-        if option_type =='put':
-            gamma_exposure = (-spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
-        strike = float(strike)
-        
-        if strike in per_strike_gamma_exposure:
-            per_strike_gamma_exposure[strike] += gamma_exposure
-        else:
-            per_strike_gamma_exposure[strike] = gamma_exposure
+        try:
+            if option_type == 'call':
+                gamma_exposure = (spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
+            if option_type =='put':
+                gamma_exposure = (-spot_price * gamma * volume * contract_size * spot_price * 0.01)/1000000000
+            strike = float(strike)
+            
+            if strike in per_strike_gamma_exposure:
+                per_strike_gamma_exposure[strike] += gamma_exposure
+            else:
+                per_strike_gamma_exposure[strike] = gamma_exposure
 
-        if strike in previous_gamma_exposure:
-            change = gamma_exposure + previous_gamma_exposure.get(strike, 0)
-            change_in_gamma_per_strike[strike] = change
-            time_of_change_per_strike[strike] = calculation_time
+            if strike in previous_gamma_exposure:
+                change = gamma_exposure + previous_gamma_exposure.get(strike, 0)
+                change_in_gamma_per_strike[strike] = change
+                time_of_change_per_strike[strike] = calculation_time
+
+        except Exception as e: 
+            print(f"Strike {strike} included incompatible data: {e}")  
+            pass
 
     for expiration_date, strikes in data.get('callExpDateMap', {}).items():
         for strike, options in strikes.items():
