@@ -10,6 +10,7 @@ import time as time_module
 from db_storage import store_raw_options_data
 
 class GammaExposureScheduler:
+    #initialize and create dictionaries for temporary data storage and analysis
     def __init__(self):
         self.current_gamma_exposure = {}
         self.previous_gamma_exposure = {}
@@ -17,6 +18,7 @@ class GammaExposureScheduler:
         self.client = None
         self.plotter = RealTimeGammaPlotter()
 
+    #API auth
     def authenticate(self):
         try:
             self.client = auth.client_from_token_file(secretsTDA.token_path, secretsTDA.api_key)
