@@ -22,8 +22,10 @@ def calculate_gamma_exposure(data, previous_gamma_exposure=None):
             else:
                 per_strike_gamma_exposure[strike] = gamma_exposure
 
-            if strike in previous_gamma_exposure:
-                change = gamma_exposure + previous_gamma_exposure.get(strike, 0)
+            # Calculate change in gamma exposure for the strike
+            if strike in previous_gamma_exposure and previous_gamma_exposure[strike] != 0:
+                previous_exposure = previous_gamma_exposure[strike]
+                change = per_strike_gamma_exposure[strike] - previous_exposure
                 change_in_gamma_per_strike[strike] = change
                 time_of_change_per_strike[strike] = calculation_time
 
