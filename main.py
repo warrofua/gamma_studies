@@ -87,7 +87,7 @@ class GammaExposureScheduler:
             else:
                 print("Outside trading hours. Waiting to resume...")
 
-            time_module.sleep(13)  # You might want to adjust this sleep time
+            time_module.sleep(13) #13 seconds is odd, but it doesn't interfere w/ the api polling every 15 seconds
 
 scheduler = GammaExposureScheduler()
 scheduler.run()
