@@ -12,9 +12,11 @@ class RealTimeGammaPlotter:
         self.ax2 = self.ax[2].twinx()  # Create a twin y-axis for the spot price on total gamma exposure over time chart
         
         # Initialize data structures to store time and total gamma exposure
-        self.total_gamma_exposure_times = []
+        self.total_gamma_exposure_times = [] #times 
         self.total_gamma_exposures = []
         self.spot_prices = []
+        self.largest_changes_strikes = []
+        self.largest_changes_values = []
 
     def init_plots(self):
         self.ax[0].clear()
@@ -62,18 +64,26 @@ class RealTimeGammaPlotter:
         self.ax[1].tick_params(axis='x', rotation=90)
         self.ax[1].legend()
 
+    # Store the largest changes for plotting on the total exposure graph
+        self.largest_changes_strikes.append(top_strike)
+        self.largest_changes_values.append(top_change)
+
     def update_total_gamma_exposure_plot(self, time_stamp, total_gamma_exposure, spot_price):
         self.total_gamma_exposure_times.append(time_stamp)
         self.total_gamma_exposures.append(total_gamma_exposure)
         self.spot_prices.append(spot_price)
 
-        # Plot total gamma exposure on the primary y-axis of the third plot
-        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure ($Bn)')
+        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-')
+        self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-')
+
+        # Plot dots for the largest changes
+        for idx, (time, change, strike) in enumerate(zip(self.total_gamma_exposure_times, self.largest_changes_values, self.largest_changes_strikes)):
+            color = 'red' if change < 0 else 'green'
+            self.ax[2].scatter([time], [self.largest_changes_values[idx]], color=color, s=30, marker='o', zorder=5)
+
         self.ax[2].legend(loc='upper left')
         self.ax[2].tick_params(axis='y', labelcolor='blue')
 
-        # Plot spot price on the secondary y-axis
-        self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-', label='SPX Spot Price')
         self.ax2.legend(loc='upper right')
         self.ax2.tick_params(axis='y', labelcolor='green')
 
