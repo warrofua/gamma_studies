@@ -39,7 +39,7 @@ class GammaExposureScheduler:
 
         try:
             if self.client:
-                r = self.client.get_option_chain(symbol='$SPX.X', contract_type=self.client.Options.ContractType.ALL, from_date=use_date, to_date=use_date, strike_count=30)
+                r = self.client.get_option_chain(symbol='$SPX.X', contract_type=self.client.Options.ContractType.ALL, from_date=use_date, to_date=use_date, strike_count=50)
                 if r.status_code == 200:
                     data = r.json()
                     total_gamma_exposure, self.current_gamma_exposure, self.change_in_gamma_per_strike, largest_changes, spot_price = calculate_gamma_exposure(data, self.previous_gamma_exposure)
@@ -49,13 +49,13 @@ class GammaExposureScheduler:
                     self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
                     self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)
                     self.plotter.show_plots()
-                    pause_duration = 14
+                    pause_duration = 5
                 else:
                     print(f"Failed to fetch data: {r.status_code}")
-                    pause_duration = 14  # Longer pause when fetch fails
+                    pause_duration = 5  # Longer pause when fetch fails
         except Exception as e:
             print(f"An error occurred: {e}")
-            pause_duration = 14  # Longer pause on error
+            pause_duration = 5  # Longer pause on error
         finally:
             # Always attempt to store data in the database, even if the fetch or plotting fails
             db_params = {
@@ -87,7 +87,7 @@ class GammaExposureScheduler:
             else:
                 print("Outside trading hours. Waiting to resume...")
 
-            time_module.sleep(13) #13 seconds is odd, but it doesn't interfere w/ the api polling every 15 seconds
+            time_module.sleep(4) #sleep until time run API request again
 
 scheduler = GammaExposureScheduler()
 scheduler.run()

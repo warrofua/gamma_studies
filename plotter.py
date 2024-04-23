@@ -61,25 +61,27 @@ class RealTimeGammaPlotter:
                 self.ax[1].bar(strikes_str[index], top_change, color='red')
                 self.ax[1].text(strikes_str[index], top_change, f'{top_change:.2f}', ha='center')
 
+                # Store the largest changes for plotting on the total exposure graph
+                self.largest_changes_strikes.append(top_strike)
+                self.largest_changes_values.append(top_change)
+
         self.ax[1].tick_params(axis='x', rotation=90)
         self.ax[1].legend()
 
-    # Store the largest changes for plotting on the total exposure graph
-        self.largest_changes_strikes.append(top_strike)
-        self.largest_changes_values.append(top_change)
 
     def update_total_gamma_exposure_plot(self, time_stamp, total_gamma_exposure, spot_price):
         self.total_gamma_exposure_times.append(time_stamp)
         self.total_gamma_exposures.append(total_gamma_exposure)
         self.spot_prices.append(spot_price)
 
-        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-')
-        self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-')
+        # plot the total gamma exposure over time on the left axis, plat the spot prices on the right axis
+        self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure')
+        self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-', label='SPX Spot Price ($)')
 
-        # Plot dots for the largest changes
-        for idx, (time, change, strike) in enumerate(zip(self.total_gamma_exposure_times, self.largest_changes_values, self.largest_changes_strikes)):
+        # On the right axis, plot dots at strikes for the largest changes 
+        for time, change, strike in zip(self.total_gamma_exposure_times, self.largest_changes_values, self.largest_changes_strikes):
             color = 'red' if change < 0 else 'green'
-            self.ax[2].scatter([time], [self.largest_changes_values[idx]], color=color, s=30, marker='o', zorder=5)
+            self.ax2.scatter([time], strike, color=color, s=10, marker='o', zorder=5)
 
         self.ax[2].legend(loc='upper left')
         self.ax[2].tick_params(axis='y', labelcolor='blue')
@@ -92,6 +94,7 @@ class RealTimeGammaPlotter:
         self.ax[2].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 
         plt.draw()
+
 
     def show_plots(self):
         plt.show(block=False)
