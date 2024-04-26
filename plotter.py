@@ -2,6 +2,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.dates as mdates
 from datetime import datetime
+from collections import deque
+import numpy as np
 
 # Adjust global font size
 mpl.rcParams.update({'font.size': mpl.rcParams['font.size'] - 4})
@@ -17,6 +19,11 @@ class RealTimeGammaPlotter:
         self.spot_prices = []
         self.largest_changes_strikes = []
         self.largest_changes_values = []
+
+        # Deques to track strikes of largest positive and negative changes for the last 20 updates
+        deque_length = 100 # mean and std. deviation length
+        self.positive_changes_strikes = deque(maxlen=deque_length)
+        self.negative_changes_strikes = deque(maxlen=deque_length)
 
     def init_plots(self):
         self.ax[0].clear()
@@ -65,9 +72,13 @@ class RealTimeGammaPlotter:
                 self.largest_changes_strikes.append(top_strike)
                 self.largest_changes_values.append(top_change)
 
+                if top_change > 0:
+                    self.positive_changes_strikes.append(top_strike)
+                elif top_change < 0:
+                    self.negative_changes_strikes.append(top_strike)
+
         self.ax[1].tick_params(axis='x', rotation=90)
         self.ax[1].legend()
-
 
     def update_total_gamma_exposure_plot(self, time_stamp, total_gamma_exposure, spot_price):
         self.total_gamma_exposure_times.append(time_stamp)
@@ -89,12 +100,27 @@ class RealTimeGammaPlotter:
         self.ax2.legend(loc='upper right')
         self.ax2.tick_params(axis='y', labelcolor='green')
 
+        # Calculate and plot the mean and standard deviation for positive strikes
+        if self.positive_changes_strikes:
+            mean_positive = np.mean(list(self.positive_changes_strikes))
+            std_dev_positive = np.std(list(self.positive_changes_strikes))
+            times_window = self.total_gamma_exposure_times[-len(self.positive_changes_strikes):]
+            self.ax2.plot(times_window, [mean_positive] * len(times_window), 'lightgreen', label='Mean Strike Positive Changes')
+            self.ax2.fill_between(times_window, mean_positive - std_dev_positive, mean_positive + std_dev_positive, color='lightgreen', alpha=0.3, label='Std Dev Positive Changes')
+
+        # Calculate and plot the mean and standard deviation for negative strikes
+        if self.negative_changes_strikes:
+            mean_negative = np.mean(list(self.negative_changes_strikes))
+            std_dev_negative = np.std(list(self.negative_changes_strikes))
+            times_window = self.total_gamma_exposure_times[-len(self.negative_changes_strikes):]
+            self.ax2.plot(times_window, [mean_negative] * len(times_window), 'lightcoral', label='Mean Strike Negative Changes')
+            self.ax2.fill_between(times_window, mean_negative - std_dev_negative, mean_negative + std_dev_negative, color='lightcoral', alpha=0.3, label='Std Dev Negative Changes')
+
         # Format the x-axis to display dates nicely
         self.ax[2].xaxis.set_major_locator(mdates.AutoDateLocator())
         self.ax[2].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
 
         plt.draw()
-
 
     def show_plots(self):
         plt.show(block=False)
