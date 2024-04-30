@@ -20,10 +20,16 @@ class RealTimeGammaPlotter:
         self.largest_changes_strikes = []
         self.largest_changes_values = []
 
-        # Deques to track strikes of largest positive and negative changes for the last 20 updates
-        deque_length = 100 # mean and std. deviation length
+        # Deques to track strikes of largest positive and negative changes for the last 'x' updates
+        deque_length = 100 # mean and std. deviation length /x/
         self.positive_changes_strikes = deque(maxlen=deque_length)
         self.negative_changes_strikes = deque(maxlen=deque_length)
+
+        # For historical mean and std tracking
+        self.mean_positive_history = []
+        self.std_positive_history = []
+        self.mean_negative_history = []
+        self.std_negative_history = []
 
     def init_plots(self):
         self.ax[0].clear()
@@ -85,7 +91,7 @@ class RealTimeGammaPlotter:
         self.total_gamma_exposures.append(total_gamma_exposure)
         self.spot_prices.append(spot_price)
 
-        # plot the total gamma exposure over time on the left axis, plat the spot prices on the right axis
+        # plot the total gamma exposure over time on the left axis, plot the spot prices on the right axis
         self.ax[2].plot(self.total_gamma_exposure_times, self.total_gamma_exposures, 'b-', label='Total Gamma Exposure')
         self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-', label='SPX Spot Price ($)')
 
@@ -100,21 +106,28 @@ class RealTimeGammaPlotter:
         self.ax2.legend(loc='upper right')
         self.ax2.tick_params(axis='y', labelcolor='green')
 
-        # Calculate and plot the mean and standard deviation for positive strikes
+        # Update and plot historical means and standard deviations
         if self.positive_changes_strikes:
             mean_positive = np.mean(list(self.positive_changes_strikes))
             std_dev_positive = np.std(list(self.positive_changes_strikes))
-            times_window = self.total_gamma_exposure_times[-len(self.positive_changes_strikes):]
-            self.ax2.plot(times_window, [mean_positive] * len(times_window), 'lightgreen', label='Mean Strike Positive Changes')
-            self.ax2.fill_between(times_window, mean_positive - std_dev_positive, mean_positive + std_dev_positive, color='lightgreen', alpha=0.3, label='Std Dev Positive Changes')
+            self.mean_positive_history.append(mean_positive)
+            self.std_positive_history.append(std_dev_positive)
 
-        # Calculate and plot the mean and standard deviation for negative strikes
+            self.ax2.plot(self.total_gamma_exposure_times[-len(self.mean_positive_history):], self.mean_positive_history, 'lightgreen', label='Mean Strike Positive Changes')
+            lower_bound = np.array(self.mean_positive_history) - np.array(self.std_positive_history)
+            upper_bound = np.array(self.mean_positive_history) + np.array(self.std_positive_history)
+            self.ax2.fill_between(self.total_gamma_exposure_times[-len(self.mean_positive_history):], lower_bound, upper_bound, color='lightgreen', alpha=0.3, label='Std Dev Positive Changes')
+
         if self.negative_changes_strikes:
             mean_negative = np.mean(list(self.negative_changes_strikes))
             std_dev_negative = np.std(list(self.negative_changes_strikes))
-            times_window = self.total_gamma_exposure_times[-len(self.negative_changes_strikes):]
-            self.ax2.plot(times_window, [mean_negative] * len(times_window), 'lightcoral', label='Mean Strike Negative Changes')
-            self.ax2.fill_between(times_window, mean_negative - std_dev_negative, mean_negative + std_dev_negative, color='lightcoral', alpha=0.3, label='Std Dev Negative Changes')
+            self.mean_negative_history.append(mean_negative)
+            self.std_negative_history.append(std_dev_negative)
+
+            self.ax2.plot(self.total_gamma_exposure_times[-len(self.mean_negative_history):], self.mean_negative_history, 'lightcoral', label='Mean Strike Negative Changes')
+            lower_bound = np.array(self.mean_negative_history) - np.array(self.std_negative_history)
+            upper_bound = np.array(self.mean_negative_history) + np.array(self.std_negative_history)
+            self.ax2.fill_between(self.total_gamma_exposure_times[-len(self.mean_negative_history):], lower_bound, upper_bound, color='lightcoral', alpha=0.3, label='Std Dev Negative Changes')
 
         # Format the x-axis to display dates nicely
         self.ax[2].xaxis.set_major_locator(mdates.AutoDateLocator())
