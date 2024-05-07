@@ -78,38 +78,6 @@ pip install -r requirements.txt
 
 
 
-Usage
-Initialization: Create an instance of RealTimeGammaPlotter.
-Data Feeding: Continuously feed the plotter with new data through the update_plot_gamma, update_plot_change_in_gamma, and update_total_gamma_exposure_plot methods.
-Visualization: Use the show_plots method to display the plots.
-
-
-Example:
-
-from RealTimeGammaPlotter import RealTimeGammaPlotter
-
-# Create an instance of the plotter
-plotter = RealTimeGammaPlotter()
-
-# Assume data is fetched from a real-time trading API
-current_gamma_exposure = {
-    "1500": 0.025,
-    "1525": 0.030,
-    ...
-}
-
-# Update and visualize the plots
-plotter.update_plot_gamma(current_gamma_exposure)
-plotter.show_plots()
-
-
-Future Work
-In the future, we plan to expand the capabilities of the RealTimeGammaPlotter to include:
-
-Variable Timeframe Options: Allow users to select different timeframes for the data they wish to analyze and display, enhancing flexibility in temporal analysis.
-Spot/Net Gamma Graph: Integrate a feature to visualize both spot gamma and net gamma in a combined graph, providing a more comprehensive view of market dynamics and option sensitivities.
-These enhancements aim to provide more robust tools for traders and analysts to adapt the plotter to varied analysis needs and market conditions.
-
 Contributing
 Contributions to this project are welcome! Please refer to the CONTRIBUTING.md for guidelines on how to make contributions.
 
