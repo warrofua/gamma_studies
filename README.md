@@ -75,7 +75,7 @@ To install all required packages, you can use the following command:
 
 ```bash
 pip install -r requirements.txt
-
+'''
 
 
 Contributing
