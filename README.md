@@ -72,10 +72,8 @@ zope.interface==6.2
 
 
 To install all required packages, you can use the following command:
-
-```bash
 pip install -r requirements.txt
-/bash
+
 
 
 Contributing
