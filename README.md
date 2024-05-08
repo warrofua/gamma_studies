@@ -17,6 +17,18 @@ It is equipped with a deque data structure to manage real-time changes efficient
 - **Twin Y-Axis Representation**: Displays gamma exposure and SPX spot prices concurrently for comparative analysis.
 - **Historical Data Analysis**: Tracks historical changes in gamma exposure to calculate and plot means and standard deviations dynamically.
 
+![5-8-24_build](https://github.com/warrofua/gamma_studies/assets/41028474/a3bd0271-5b8d-488d-a09e-c81f1c0f4da7)
+Graph #1:
+gamma premium histogram since 9:30am open
+
+Graph #2:
+Largest change in gamma/t
+
+Graph #3:
+Dots represent "strike of greatest gamma increase per t". Clouds are the mean and standard deviation of each color, representing a measure of the sentiment in that new option premium's "strength" at moving the market (based on how far away from mean it is), the current trend, etc.
+
+Also shows net gamma in blue line and spot price in green line. Sorry for poor legends, will fix in next buiild!
+
 ## Requirements
 
 This project requires Python 3.8 or later. Below are the Python libraries needed:
