@@ -17,8 +17,7 @@ class RealTimeGammaPlotter:
         self.total_gamma_exposure_times = [] #times 
         self.total_gamma_exposures = []
         self.spot_prices = []
-        self.largest_changes_strikes = []
-        self.largest_changes_values = []
+        self.largest_change_points = deque(maxlen=200)
 
         # Deques to track strikes of largest positive and negative changes for the last 'x' updates
         deque_length = 100 # mean and std. deviation length /x/
@@ -68,15 +67,14 @@ class RealTimeGammaPlotter:
         self.ax[1].bar(strikes_str, changes_in_gamma, color='lightgrey', label='Change in Gamma ($Bn)')
 
         # Annotate largest changes
-        for top_strike, top_change, _ in largest_changes:  # Assume largest_changes includes the time as a third element now
+        for top_strike, top_change, timestamp in largest_changes:
             if str(top_strike) in strikes_str:
                 index = strikes_str.index(str(top_strike))
                 self.ax[1].bar(strikes_str[index], top_change, color='red')
                 self.ax[1].text(strikes_str[index], top_change, f'{top_change:.2f}', ha='center')
 
                 # Store the largest changes for plotting on the total exposure graph
-                self.largest_changes_strikes.append(top_strike)
-                self.largest_changes_values.append(top_change)
+                self.largest_change_points.append((timestamp, top_strike, top_change))
 
                 if top_change > 0:
                     self.positive_changes_strikes.append(top_strike)
@@ -96,9 +94,9 @@ class RealTimeGammaPlotter:
         self.ax2.plot(self.total_gamma_exposure_times, self.spot_prices, 'g-', label='SPX Spot Price ($)')
 
         # On the right axis, plot dots at strikes for the largest changes 
-        for time, change, strike in zip(self.total_gamma_exposure_times, self.largest_changes_values, self.largest_changes_strikes):
+        for timestamp, strike, change in self.largest_change_points:
             color = 'red' if change < 0 else 'green'
-            self.ax2.scatter([time], strike, color=color, s=10, marker='o', zorder=5)
+            self.ax2.scatter([timestamp], [strike], color=color, s=10, marker='o', zorder=5)
 
         self.ax[2].legend(loc='upper left')
         self.ax[2].tick_params(axis='y', labelcolor='blue')
