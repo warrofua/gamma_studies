@@ -55,7 +55,8 @@ def _load_broker_client(preferred_broker: Optional[str] = None) -> Tuple[str, ob
 
                 return "Schwab", schwab_auth, schwab_client, secretsSchwab
             except ModuleNotFoundError as exc:  # pragma: no cover - import guard
-                errors.append(f"Schwab configuration unavailable: {exc}")
+                missing = getattr(exc, "name", "schwab component")
+                errors.append(f"Schwab configuration unavailable (missing {missing})")
         elif broker_key == "tda":
             try:
                 from tda import auth as tda_auth, client as tda_client  # type: ignore
@@ -63,7 +64,8 @@ def _load_broker_client(preferred_broker: Optional[str] = None) -> Tuple[str, ob
 
                 return "TD Ameritrade", tda_auth, tda_client, secretsTDA
             except ModuleNotFoundError as exc:  # pragma: no cover - import guard
-                errors.append(f"TD Ameritrade configuration unavailable: {exc}")
+                missing = getattr(exc, "name", "tda component")
+                errors.append(f"TD Ameritrade configuration unavailable (missing {missing})")
 
         return None
 

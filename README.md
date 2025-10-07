@@ -17,7 +17,9 @@ The data ingestion layer automatically selects a brokerage API based on what is
 available in your environment.  Set the ``BROKER`` environment variable to
 ``schwab`` or ``tda`` to explicitly choose a provider.  Each broker requires a
 ``secretsSchwab.py`` or ``secretsTDA.py`` module (respectively) that exposes the
-credentials referenced in ``main.py``.
+credentials referenced in ``main.py``.  Keep these files local—they are excluded
+from version control alongside the generated token files—so that your API keys,
+client identifiers, and refresh tokens never leave your machine.
 
 ## Features
 
