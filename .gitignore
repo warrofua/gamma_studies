@@ -1,5 +1,10 @@
 secretsTDA.py
+secretsSchwab.py
 token
+schwab_token
+schwab_token.json
+tda_token
+tda_token.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
