@@ -8,7 +8,7 @@ GammaCalculationResult = Tuple[
     float,
     Dict[float, float],
     Dict[float, float],
-    List[Tuple[float, float, str]],
+    List[Tuple[float, float, datetime.datetime]],
     float,
 ]
 
@@ -74,7 +74,7 @@ def calculate_gamma_exposure(
         (
             strike,
             change,
-            time_of_change_per_strike[strike].strftime("%Y-%m-%d %H:%M:%S"),
+            time_of_change_per_strike[strike],
         )
         for strike, change in largest_changes_with_time
     ]
