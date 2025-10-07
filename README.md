@@ -19,7 +19,10 @@ available in your environment.  Set the ``BROKER`` environment variable to
 ``secretsSchwab.py`` or ``secretsTDA.py`` module (respectively) that exposes the
 credentials referenced in ``main.py``.  Keep these files local—they are excluded
 from version control alongside the generated token files—so that your API keys,
-client identifiers, and refresh tokens never leave your machine.
+client identifiers, and refresh tokens never leave your machine.  The Schwab
+integration ships with a template ``secretsSchwab.py`` that defaults the OAuth
+redirect URI to ``https://127.0.0.1`` as required by the Schwab developer
+platform.
 
 ## Features
 

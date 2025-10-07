@@ -21,6 +21,13 @@ from plotter import RealTimeGammaPlotter
 from db_storage import store_raw_options_data
 
 
+# Charles Schwab uses a loopback HTTPS redirect during OAuth flows.  The
+# application falls back to this value whenever the secrets module does not
+# provide an explicit URI so that both the login and token refresh flows share a
+# consistent default.
+DEFAULT_REDIRECT_URI = "https://127.0.0.1"
+
+
 class BrokerConfigurationError(RuntimeError):
     """Raised when a supported broker configuration cannot be located."""
 
@@ -113,8 +120,9 @@ class GammaExposureScheduler:
     def authenticate(self):
         try:
             auth_kwargs = {}
-            if hasattr(self.secrets, "redirect_uri"):
-                auth_kwargs["redirect_uri"] = self.secrets.redirect_uri
+            redirect_uri = getattr(self.secrets, "redirect_uri", None) or DEFAULT_REDIRECT_URI
+            if redirect_uri:
+                auth_kwargs["redirect_uri"] = redirect_uri
             if hasattr(self.secrets, "token_encryption_key"):
                 auth_kwargs["encryption_key"] = getattr(self.secrets, "token_encryption_key")
             if hasattr(self.secrets, "cert_file"):
@@ -135,7 +143,8 @@ class GammaExposureScheduler:
                 login_kwargs = {
                     "driver": driver,
                     "api_key": self.secrets.api_key,
-                    "redirect_uri": getattr(self.secrets, "redirect_uri", None),
+                    "redirect_uri": getattr(self.secrets, "redirect_uri", None)
+                    or DEFAULT_REDIRECT_URI,
                     "token_path": self.secrets.token_path,
                 }
 
