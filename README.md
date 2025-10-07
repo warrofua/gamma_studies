@@ -1,6 +1,6 @@
 # Real-Time Gamma Exposure Plotter
 
-This repository contains the Python code for a real-time gamma exposure plotting tool designed for options trading. The tool visualizes gamma exposure per strike, changes in gamma exposure, and total gamma exposure over time, integrating live market data to provide insightful visual analytics.
+This repository contains the Python code for a real-time gamma exposure plotting tool designed for options trading. The tool visualizes gamma exposure per strike, changes in gamma exposure, and total gamma exposure over time, integrating live market data to provide insightful visual analytics.  The application now supports both TD Ameritrade and Charles Schwab brokerage APIs.
 
 ## Overview
 
@@ -10,6 +10,14 @@ The `RealTimeGammaPlotter` class is a comprehensive tool that handles real-time 
 - Total gamma exposure alongside SPX spot prices over time.
 
 It is equipped with a deque data structure to manage real-time changes efficiently and matplotlib for dynamic plotting.
+
+### Broker configuration
+
+The data ingestion layer automatically selects a brokerage API based on what is
+available in your environment.  Set the ``BROKER`` environment variable to
+``schwab`` or ``tda`` to explicitly choose a provider.  Each broker requires a
+``secretsSchwab.py`` or ``secretsTDA.py`` module (respectively) that exposes the
+credentials referenced in ``main.py``.
 
 ## Features
 
@@ -71,6 +79,7 @@ selenium==4.18.1
 six==1.16.0
 sniffio==1.3.1
 sortedcontainers==2.4.0
+schwab-py==1.0.0
 tda-api==1.6.0
 trio==0.24.0
 trio-websocket==0.11.1
