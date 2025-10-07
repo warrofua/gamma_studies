@@ -52,7 +52,10 @@ class RealTimeGammaPlotter:
     def update_plot_gamma(self, current_gamma_exposure):
         self.init_plots()
 
-        strikes = list(current_gamma_exposure.keys())
+        strikes = sorted(
+            current_gamma_exposure.keys(),
+            key=lambda strike: float(strike)
+        )
         gamma_exposures = [current_gamma_exposure[strike] for strike in strikes]
         strikes_str = [str(strike) for strike in strikes]
 
@@ -61,7 +64,10 @@ class RealTimeGammaPlotter:
         self.ax[0].legend()
 
     def update_plot_change_in_gamma(self, change_in_gamma_per_strike, largest_changes):
-        strikes = list(change_in_gamma_per_strike.keys())
+        strikes = sorted(
+            change_in_gamma_per_strike.keys(),
+            key=lambda strike: float(strike)
+        )
         changes_in_gamma = [change_in_gamma_per_strike[strike] for strike in strikes]
         strikes_str = [str(strike) for strike in strikes]
 
