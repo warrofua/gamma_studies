@@ -34,8 +34,16 @@ app_secret = os.environ.get("SCHWAB_APP_SECRET", "YOUR_APP_SECRET_HERE")
 
 # Location on disk where the Schwab token JSON file should be stored.  This is
 # created automatically during the first authentication flow.
-token_path = os.environ.get(
+# Always resolve to an absolute path under home so the token persists across
+# workspace switches, venv changes, and cwd changes.
+_raw_path = os.environ.get(
     "SCHWAB_TOKEN_PATH", str(Path.home() / "schwab_token.json")
+)
+_token_path = Path(_raw_path)
+token_path = str(
+    _token_path
+    if _token_path.is_absolute()
+    else Path.home() / _token_path.name
 )
 
 # Schwab requires a secure loopback redirect.  The application expects this

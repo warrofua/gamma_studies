@@ -33,6 +33,9 @@ from db_storage import store_raw_options_data
 # consistent default.
 DEFAULT_REDIRECT_URI = "https://127.0.0.1"
 
+# Schwab OAuth token endpoint (fallback when session metadata doesn't provide it).
+SCHWAB_TOKEN_ENDPOINT = "https://api.schwabapi.com/v1/oauth/token"
+
 
 class BrokerConfigurationError(RuntimeError):
     """Raised when a supported broker configuration cannot be located."""
@@ -127,26 +130,46 @@ class GammaExposureScheduler:
         """Force a token refresh on startup to reset Schwab's 7-day inactivity clock.
 
         Schwab refresh tokens expire after ~7 days of *inactivity*—meaning the refresh
-        token must be *used* at least every ~6 days. The refresh token is only used
-        when the access token (30 min) expires and an API call is made. If the user
-        opens the app while the access token is still valid, no refresh occurs and
-        the 7-day clock keeps ticking. Proactively refreshing on every launch ensures
-        the refresh token is used and the clock resets.
+        token must be *used* at least every ~6 days. The access token expires in 30 min.
+        Proactively refreshing on every launch ensures the refresh token is used and
+        the clock resets, and gives us a fresh access token before any API calls.
         """
-        if getattr(client, "session", None) is None:
+        session = getattr(client, "session", None)
+        if session is None:
             return
-        session = client.session
         token = getattr(session, "token", None)
         if token is None or not token.get("refresh_token"):
             return
-        token_endpoint = getattr(session, "metadata", {}).get("token_endpoint")
+        # Try multiple sources for token_endpoint (authlib/schwab-py structure varies).
+        metadata = getattr(session, "metadata", None) or {}
+        token_endpoint = (
+            metadata.get("token_endpoint")
+            or getattr(session, "token_endpoint", None)
+            or SCHWAB_TOKEN_ENDPOINT
+        )
         if not token_endpoint:
             return
-        # Force the access token to appear expired so ensure_active_token will refresh.
-        # The refresh uses the refresh token (resetting Schwab's 7-day inactivity clock)
-        # and update_token writes the new access token to disk.
-        token["expires_at"] = 0
-        session.ensure_active_token(token)
+        # ensure_active_token does not update the token (authlib/schwab-py); use
+        # refresh_token directly to get a new access token and reset the 7-day clock.
+        try:
+            refresh_fn = getattr(session, "refresh_token", None)
+            if callable(refresh_fn):
+                new_token = refresh_fn(token_endpoint, refresh_token=token.get("refresh_token"))
+                if new_token:
+                    token.update(new_token)
+                    update_token = getattr(session, "update_token", None)
+                    if callable(update_token):
+                        update_token(new_token, refresh_token=new_token.get("refresh_token"))
+            else:
+                # Fallback: ensure_active_token (may not work with all authlib versions)
+                token["expires_at"] = 0
+                if callable(getattr(session, "ensure_active_token", None)):
+                    try:
+                        session.ensure_active_token(token)
+                    except TypeError:
+                        session.ensure_active_token()
+        except Exception:
+            raise
 
     #API auth
     def authenticate(self):
@@ -175,25 +198,7 @@ class GammaExposureScheduler:
         except FileNotFoundError:
             redirect_uri = getattr(self.secrets, "redirect_uri", None) or DEFAULT_REDIRECT_URI
 
-            if hasattr(self.auth_module, "client_from_login_flow"):
-                # TDA: automated login via Selenium
-                with webdriver.Chrome() as driver:
-                    login_kwargs = {
-                        "driver": driver,
-                        "api_key": self.secrets.api_key,
-                        "redirect_uri": redirect_uri,
-                        "token_path": self.secrets.token_path,
-                    }
-                    for optional_attr in ("cert_file", "encryption_key", "token_encryption_key"):
-                        if hasattr(self.secrets, optional_attr):
-                            login_kwargs[optional_attr] = getattr(self.secrets, optional_attr)
-                    login_kwargs = {k: v for k, v in login_kwargs.items() if v is not None}
-                    filtered_login_kwargs = self._filter_supported_kwargs(
-                        self.auth_module.client_from_login_flow,
-                        login_kwargs,
-                    )
-                    self.client = self.auth_module.client_from_login_flow(**filtered_login_kwargs)
-            elif hasattr(self.auth_module, "client_from_manual_flow"):
+            if self.broker_name == "Schwab" and hasattr(self.auth_module, "client_from_manual_flow"):
                 # Schwab: manual flow (print URL, user pastes redirect back)
                 if (self.secrets.api_key == "YOUR_SCHWAB_CLIENT_ID@AMER.OAUTHAP"
                         or self.secrets.app_secret == "YOUR_APP_SECRET_HERE"):
@@ -236,6 +241,24 @@ class GammaExposureScheduler:
                 finally:
                     if _orig_prompt is not None:
                         self.auth_module.prompt = _orig_prompt
+            elif hasattr(self.auth_module, "client_from_login_flow"):
+                # TDA: automated login via Selenium
+                with webdriver.Chrome() as driver:
+                    login_kwargs = {
+                        "driver": driver,
+                        "api_key": self.secrets.api_key,
+                        "redirect_uri": redirect_uri,
+                        "token_path": self.secrets.token_path,
+                    }
+                    for optional_attr in ("cert_file", "encryption_key", "token_encryption_key"):
+                        if hasattr(self.secrets, optional_attr):
+                            login_kwargs[optional_attr] = getattr(self.secrets, optional_attr)
+                    login_kwargs = {k: v for k, v in login_kwargs.items() if v is not None}
+                    filtered_login_kwargs = self._filter_supported_kwargs(
+                        self.auth_module.client_from_login_flow,
+                        login_kwargs,
+                    )
+                    self.client = self.auth_module.client_from_login_flow(**filtered_login_kwargs)
             else:
                 raise BrokerConfigurationError(
                     f"No token file at {self.secrets.token_path} and no login flow "
@@ -245,9 +268,34 @@ class GammaExposureScheduler:
         if self.client and self.broker_name == "Schwab":
             try:
                 self._proactive_schwab_token_refresh(self.client)
+                # Warmup: make a lightweight API call to force authlib to refresh if token
+                # expired (proactive refresh may have returned early). This ensures we have
+                # a valid access token before the dashboard makes its first request.
+                warmup = getattr(self.client, "get_quote", None) or getattr(
+                    self.client, "get_price_history_every_day", None
+                )
+                if callable(warmup):
+                    symbol = getattr(self.secrets, "option_symbol", "$SPX")
+                    if symbol:
+                        symbol = symbol.split(".")[0]  # $SPX.X -> $SPX
+                    symbol = symbol or "$SPX"
+                    try:
+                        r = warmup(symbol)
+                        if r.status_code == 401:
+                            raise BrokerConfigurationError(
+                                "Schwab token expired (401). Delete your token file and restart:\n\n"
+                                f"  rm {self.secrets.token_path}\n\n"
+                                "Then restart the app; you'll be prompted to complete the OAuth flow."
+                            )
+                    except BrokerConfigurationError:
+                        raise
+                    except Exception:
+                        pass  # warmup best-effort; proceed if it fails for other reasons
+            except BrokerConfigurationError:
+                raise
             except Exception as exc:
                 _msg = str(exc).lower()
-                if "refresh" in _msg or "token" in _msg or "invalid_client" in _msg:
+                if "refresh" in _msg or "token" in _msg or "invalid_client" in _msg or "401" in _msg:
                     raise BrokerConfigurationError(
                         "Refresh token expired. Schwab refresh tokens expire after ~7 days of "
                         "inactivity. Delete your token file and restart to re-authenticate:\n\n"

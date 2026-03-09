@@ -261,10 +261,21 @@ def fetch_options_and_gex(
     if contract_type_all is not None:
         kwargs["contract_type"] = contract_type_all
 
+    def _do_request():
+        return client.get_option_chain(**kwargs)
+
     try:
-        r = client.get_option_chain(**kwargs)
+        r = _do_request()
     except Exception as e:
         return None, str(e)
+
+    # On 401, try one refresh and retry (handles stale cached client).
+    if r.status_code == 401:
+        try:
+            GammaExposureScheduler._proactive_schwab_token_refresh(client)
+            r = _do_request()
+        except Exception:
+            pass
 
     if r.status_code != 200:
         body = r.text
@@ -338,10 +349,12 @@ class SymbolGexData:
 
 
 def _effective_strike_range(strike_range: int, spot_price: float) -> int:
-    """Scale strike window for lower-priced underlyings (SPY, QQQ)."""
+    """Scale strike window for lower-priced underlyings (SPY, QQQ).
+    Use 50% of spot for SPY/QQQ so ~±300 for SPY at 600, giving ~$1 strikes
+    full visibility. Previously 20% gave only ±120 which was too narrow."""
     if spot_price >= 1000:
         return strike_range
-    return min(strike_range, max(50, int(spot_price * 0.2)))
+    return min(strike_range, max(100, int(spot_price * 0.5)))
 
 
 def process_symbol_gex(
@@ -359,9 +372,19 @@ def process_symbol_gex(
     strikes_in_window = [s for s in all_strikes if abs(s - spot_price) <= eff_range]
     if not strikes_in_window:
         strikes_in_window = all_strikes
-    strikes = [s for s in strikes_in_window if abs(per_strike_gex[s]) >= gex_min_threshold]
+    # Noise floor: never show $0.00B GEX strikes (common on SPY/QQQ with many low-OI strikes)
+    NOISE_FLOOR = 0.01
+    strikes = [
+        s for s in strikes_in_window
+        if abs(per_strike_gex[s]) >= max(gex_min_threshold, NOISE_FLOOR)
+    ]
     if not strikes:
-        strikes = strikes_in_window
+        strikes = [s for s in strikes_in_window if abs(per_strike_gex[s]) >= NOISE_FLOOR] or strikes_in_window
+    # If GEX threshold filters down to very few strikes, show more range but still exclude zeros
+    if len(strikes) < 15 and len(strikes_in_window) > len(strikes):
+        expanded = [s for s in strikes_in_window if abs(per_strike_gex[s]) >= NOISE_FLOOR]
+        if expanded:
+            strikes = expanded
 
     sorted_by_abs = sorted(
         [(s, per_strike_gex[s]) for s in strikes],
@@ -446,8 +469,9 @@ def build_heatmap_fig(
     max_abs = max(abs(g) for g in gex_values) if gex_values else 1
 
     # Normalize y to [0, y_domain_max] so all heatmaps have same visual scale (SPX/SPY/QQQ)
+    # Low strike prices at bottom, high strike prices at top
     n = len(strikes)
-    y_positions = np.linspace(y_domain_max, 0, n) if n > 1 else np.array([y_domain_max / 2])
+    y_positions = np.linspace(0, y_domain_max, n) if n > 1 else np.array([y_domain_max / 2])
     strike_to_y = {s: y_positions[i] for i, s in enumerate(strikes)}
 
     z = np.array([[g] for g in gex_values])
@@ -566,7 +590,7 @@ def build_heatmap_fig(
         xaxis_title="GEX ($B)",
         yaxis_title="Strike Price",
         yaxis=dict(
-            range=[y_domain_max + 2, -2],
+            range=[-2, y_domain_max + 2],
             tickmode="array",
             tickvals=tickvals,
             ticktext=ticktext,
@@ -795,7 +819,7 @@ with st.sidebar:
         "GEX min threshold ($B)",
         min_value=0.0,
         max_value=10.0,
-        value=0.3,
+        value=0.1,
         step=0.1,
         key="gex_threshold",
         help="Hide strikes with |GEX| below this (0 = show all)",
