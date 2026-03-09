@@ -26,6 +26,23 @@ import plotly.graph_objects as go
 SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
 
 
+def _format_time_ago(seconds: float) -> str:
+    """Format elapsed seconds as human-readable 'X min ago' or 'Xh Ym ago'."""
+    if seconds < 60:
+        return "< 1 min ago"
+    if seconds < 3600:
+        mins = int(seconds / 60)
+        return f"{mins} min ago"
+    if seconds < 86400:
+        hours = int(seconds / 3600)
+        mins = int((seconds % 3600) / 60)
+        if mins == 0:
+            return f"{hours}h ago"
+        return f"{hours}h {mins}m ago"
+    days = int(seconds / 86400)
+    return f"{days}d ago"
+
+
 @st.cache_data(ttl=86400)
 def get_sp500_symbols() -> List[str]:
     """Fetch S&P 500 constituent symbols. Returns sorted list of tickers."""
@@ -223,7 +240,7 @@ def fetch_options_and_gex(
     strike_count: int,
     previous_gamma: Optional[Dict[float, float]] = None,
     client_module=None,
-) -> Tuple[Optional[Tuple[Dict, float, Dict[float, float], Dict[float, Dict], float, datetime.date]], Optional[str]]:
+) -> Tuple[Optional[Tuple[Dict, float, Dict[float, float], Dict[float, Dict], float, date, float, bool, Dict[float, float]]], Optional[str]]:
     """Fetch option chain, compute GEX.
     Returns (result_tuple, error_message). Result is None on failure."""
     eastern = pytz.timezone("US/Eastern")
@@ -318,12 +335,14 @@ def fetch_options_and_gex(
     (
         total_gex,
         per_strike_gex,
-        _change_in_gamma,
+        change_in_gamma,
         _largest_changes,
         spot_price,
     ) = calculate_gamma_exposure(data_filtered, previous_gamma or {})
+    gamma_delta = sum(change_in_gamma.values()) if change_in_gamma else 0.0
+    is_first_fetch = not bool(previous_gamma or {})
     details = get_per_strike_details(data_filtered)
-    return (data_filtered, total_gex, per_strike_gex, details, spot_price, use_date), None
+    return (data_filtered, total_gex, per_strike_gex, details, spot_price, use_date, gamma_delta, is_first_fetch, change_in_gamma), None
 
 
 @dataclass
@@ -346,6 +365,14 @@ class SymbolGexData:
     dist_to_king: Optional[float]
     nearest_gk_below: Optional[float]
     nearest_gk_above: Optional[float]
+    dist_to_flip_pct: Optional[float] = None
+    points_to_flip: Optional[float] = None
+    gamma_delta: Optional[float] = None
+    is_first_fetch: bool = False
+    top_strike_velocity_strike: Optional[float] = None
+    top_strike_velocity_value: Optional[float] = None
+    prev_gamma_velocity: Optional[float] = None
+    prev_fetch_timestamp: Optional[datetime] = None
 
 
 def _effective_strike_range(strike_range: int, spot_price: float) -> int:
@@ -363,7 +390,7 @@ def process_symbol_gex(
     gex_min_threshold: float,
 ) -> Optional[SymbolGexData]:
     """Process fetch result into SymbolGexData. Returns None if no usable strikes."""
-    _data, total_gex, per_strike_gex, strike_details, spot_price, exp_date = result
+    _data, total_gex, per_strike_gex, strike_details, spot_price, exp_date, gamma_delta, is_first_fetch, change_in_gamma = result
     all_strikes = sorted(per_strike_gex.keys(), reverse=True)
     if not all_strikes:
         return None
@@ -425,6 +452,27 @@ def process_symbol_gex(
             gamma_flip_strike = s
             break
 
+    dist_to_flip_pct = (
+        abs(spot_price - gamma_flip_strike) / spot_price * 100
+        if gamma_flip_strike is not None and spot_price > 0
+        else None
+    )
+    points_to_flip = (
+        abs(spot_price - gamma_flip_strike)
+        if gamma_flip_strike is not None
+        else None
+    )
+    # Strike gaining gamma the fastest (largest positive change)
+    top_strike_velocity_strike = None
+    top_strike_velocity_value = None
+    if change_in_gamma:
+        positive_changes = [(s, v) for s, v in change_in_gamma.items() if v > 0]
+        if positive_changes:
+            top_strike_velocity_strike, top_strike_velocity_value = max(positive_changes, key=lambda x: x[1])
+        else:
+            # Fallback: strike with least negative change (biggest draw)
+            top_strike_velocity_strike, top_strike_velocity_value = max(change_in_gamma.items(), key=lambda x: x[1])
+
     return SymbolGexData(
         symbol="",
         label="",
@@ -443,6 +491,12 @@ def process_symbol_gex(
         dist_to_king=dist_to_king,
         nearest_gk_below=nearest_gk_below,
         nearest_gk_above=nearest_gk_above,
+        dist_to_flip_pct=dist_to_flip_pct,
+        points_to_flip=points_to_flip,
+        gamma_delta=gamma_delta,
+        is_first_fetch=is_first_fetch,
+        top_strike_velocity_strike=top_strike_velocity_strike,
+        top_strike_velocity_value=top_strike_velocity_value,
     )
 
 
@@ -685,11 +739,11 @@ def get_confluence_alerts(symbol_data: Dict[str, SymbolGexData]) -> List[str]:
     return alerts
 
 
-def _build_gex_payload(symbol_data: Dict[str, SymbolGexData]) -> str:
+def _build_gex_payload(symbol_data: Dict[str, SymbolGexData], include_extended: bool = False) -> str:
     """Build a structured JSON payload of gamma data for all symbols, for LLM consumption."""
     payload = {}
-    for label in ["SPX", "SPY", "QQQ"]:
-        d = symbol_data.get(label)
+    for label in symbol_data.keys():
+        d = symbol_data[label]
         if d is None:
             continue
         p = {
@@ -707,6 +761,23 @@ def _build_gex_payload(symbol_data: Dict[str, SymbolGexData]) -> str:
             "gamma_flip_strike": d.gamma_flip_strike,
             "exp_date": str(d.exp_date),
         }
+        if include_extended:
+            p["regime_gauge"] = {
+                "dist_to_flip_pct": round(d.dist_to_flip_pct, 2) if d.dist_to_flip_pct is not None else None,
+                "points_to_flip": round(d.points_to_flip, 2) if d.points_to_flip is not None else None,
+                "regime": (
+                    "Stable (scalp mean reversion)" if d.dist_to_flip_pct and d.dist_to_flip_pct > 1.0
+                    else "Transition (caution)" if d.dist_to_flip_pct and d.dist_to_flip_pct >= 0.5
+                    else "Volatile (prepare for trending)" if d.dist_to_flip_pct is not None else None
+                ),
+            }
+            p["gamma_velocity"] = {
+                "total_delta_B": round(d.gamma_delta, 3) if d.gamma_delta is not None else None,
+                "top_strike_velocity": {
+                    "strike": d.top_strike_velocity_strike,
+                    "delta_B": round(d.top_strike_velocity_value, 3) if d.top_strike_velocity_value is not None else None,
+                } if d.top_strike_velocity_strike is not None else None,
+            }
         payload[label] = p
     return json.dumps(payload, indent=2)
 
@@ -714,6 +785,7 @@ def _build_gex_payload(symbol_data: Dict[str, SymbolGexData]) -> str:
 def generate_llm_interpretation(
     symbol_data: Dict[str, SymbolGexData],
     confluence_alerts: List[str],
+    is_single_ticker: bool = False,
 ) -> Optional[str]:
     """Call Gemini with actual gamma data to produce actionable buy/sell guidance.
     Returns None if API key missing or call fails (caller should fallback to generic interpretation)."""
@@ -721,10 +793,42 @@ def generate_llm_interpretation(
     if not api_key or api_key.strip() == "":
         return None
 
-    payload = _build_gex_payload(symbol_data)
+    payload = _build_gex_payload(symbol_data, include_extended=is_single_ticker)
     today = datetime.now(pytz.timezone("US/Eastern")).strftime("%A, %B %d, %Y")
+    symbols_str = ", ".join(symbol_data.keys())
 
-    prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader for TODAY ({today}) based on the following gamma exposure (GEX) data for SPX, SPY, and QQQ. These underlyings are highly correlated: SPX is the S&P 500 index, SPY tracks it at ~1/10 scale, QQQ is tech-heavy.
+    if is_single_ticker:
+        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader for TODAY ({today}) on **day-trading** a single underlying: {symbols_str}. The user has the following GEX data including regime and velocity metrics.
+
+GEX DATA (JSON):
+```
+{payload}
+```
+
+CONFLUENCE ALERTS (if any): {confluence_alerts if confluence_alerts else "None"}
+
+DEFINITIONS:
+- **Spot** = current price
+- **King Node** = strike with largest |GEX|; positive GEX = support (dealers buy as spot falls), negative = resistance (dealers sell as spot rises)
+- **Downside defense** = support levels (positive GEX below spot)
+- **Upside resistance** = resistance levels (negative GEX above spot)
+- **Total GEX** > 0: dealers long gamma → mean reversion, dampened moves
+- **Total GEX** < 0: dealers short gamma → momentum can extend
+- **Gamma flip strike** = level where cumulative gamma flips sign; breaks above/below can accelerate dealer hedging
+- **Regime Gauge (DtF)**: Distance-to-Flip = % distance from spot to zero-gamma flip. >1% = Stable (scalp mean reversion), 0.5–1% = Transition (caution), <0.5% = Volatile (prepare for trending). Points to Flip = distance in points.
+- **Gamma Velocity**: Change in total GEX since last refresh. Positive = gamma being added (dealers accumulating), negative = gamma being shed.
+- **Top Strike Velocity**: The strike gaining gamma fastest. Acts as "Magnetic North"—price may gravitate toward it as dealers hedge.
+
+TASK: Write a concise, actionable interpretation (4–6 short paragraphs) that gives **clear day-trading recommendations** for this setup. Include:
+
+1. **Regime analysis**: What does the DtF (Distance-to-Flip) and regime tell you? Is this a scalp/mean-reversion environment or a trending environment?
+2. **Velocity analysis**: What does gamma velocity imply? Is the Top Strike Velocity (magnetic north) relevant for entries or targets?
+3. **Concrete recommendations**: Entry, stop, and target levels. Reference actual strikes and distances.
+4. **When to trade vs. when to stay away**: If the setup is poor (e.g., volatile regime, near flip, mixed signals, low conviction), say so clearly and recommend staying flat or reducing size. Do not force a trade when the data suggests caution.
+
+Use plain language. Reference actual numbers (strikes, distances, percentages). Give clear directional bias when the data supports it; give clear "stay away" or "reduce size" advice when it does not."""
+    else:
+        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader for TODAY ({today}) based on the following gamma exposure (GEX) data for {symbols_str}. These underlyings are highly correlated: SPX is the S&P 500 index, SPY tracks it at ~1/10 scale, QQQ is tech-heavy.
 
 GEX DATA (JSON):
 ```
@@ -745,7 +849,7 @@ DEFINITIONS:
 TASK: Write a concise, actionable interpretation (3–5 short paragraphs) that guides the user on **how to think about buying and selling** at the current spot prices today. Be specific:
 1. For each symbol with data: Is spot near support or resistance? Should they lean long, short, or neutral?
 2. What concrete levels should they watch for entries, stops, and targets?
-3. What does confluence across SPX/SPY/QQQ imply for conviction?
+3. What does confluence across symbols imply for conviction?
 4. Any caveats (e.g., near expiry, mixed signals)?
 
 Use plain language. Reference actual numbers (strikes, distances). Do not hedge with disclaimers; give clear directional bias where the data supports it."""
@@ -794,7 +898,6 @@ if client is None:
 
 with st.sidebar:
     st.title("Gamma Exposure")
-    st.caption("SPX | SPY | QQQ side-by-side")
     if not os.environ.get("GEMINI_API_KEY"):
         st.caption("💡 Set GEMINI_API_KEY in .env for AI interpretation")
     strike_count = st.slider("Strike count", min_value=10, max_value=100, value=50, key="strikes")
@@ -824,26 +927,40 @@ with st.sidebar:
         key="gex_threshold",
         help="Hide strikes with |GEX| below this (0 = show all)",
     )
-    all_symbol_options = ["SPX", "SPY", "QQQ"] + get_sp500_symbols()
-    selected_symbols = st.multiselect(
-        "Symbols to display",
-        options=all_symbol_options,
-        default=["SPX", "SPY", "QQQ"],
-        key="symbol_selector",
-    )
-    if len(selected_symbols) > 6:
-        st.caption("Showing first 6 symbols (max to avoid slow fetches).")
-        selected_symbols = selected_symbols[:6]
-    if not selected_symbols:
-        selected_symbols = ["SPX", "SPY", "QQQ"]
     if st.button("Refresh now"):
         st.rerun()
 
 st.caption(f"Using {broker_name} API")
 
+# --- Display mode (main pane top) ---
+display_mode = st.radio(
+    "Display mode",
+    options=["Single Ticker", "Trinity Display"],
+    index=0,
+    key="display_mode",
+    horizontal=True,
+)
+all_symbol_options = ["SPX", "SPY", "QQQ"] + get_sp500_symbols()
+if display_mode == "Single Ticker":
+    single_ticker = st.selectbox(
+        "Symbol",
+        options=all_symbol_options,
+        index=1,  # SPY
+        key="single_ticker",
+    )
+    selected_symbols = [single_ticker]
+else:
+    selected_symbols = ["SPX", "SPY", "QQQ"]
+
+st.markdown("---")
+
 # --- Fetch all symbols ---
 if "previous_gex" not in st.session_state:
     st.session_state.previous_gex = {}
+if "previous_gamma_velocity" not in st.session_state:
+    st.session_state.previous_gamma_velocity = {}
+if "previous_gamma_velocity_timestamp" not in st.session_state:
+    st.session_state.previous_gamma_velocity_timestamp = {}
 
 symbol_data: Dict[str, SymbolGexData] = {}
 fetch_errors: List[str] = []
@@ -860,12 +977,21 @@ with st.spinner(f"Fetching {', '.join(selected_symbols)}..."):
             fetch_errors.append(f"{label}: {err_msg}")
             continue
         st.session_state.previous_gex[api_symbol] = dict(result[2])  # per_strike_gex
+        gamma_delta = result[6]
+        eastern = pytz.timezone("US/Eastern")
+        fetch_now = datetime.now(eastern)
+        prev_velocity = st.session_state.previous_gamma_velocity.get(api_symbol)
+        prev_timestamp = st.session_state.previous_gamma_velocity_timestamp.get(api_symbol)
+        st.session_state.previous_gamma_velocity[api_symbol] = gamma_delta
+        st.session_state.previous_gamma_velocity_timestamp[api_symbol] = fetch_now
         processed = process_symbol_gex(result, strike_range, gex_min_threshold)
         if processed is None:
             fetch_errors.append(f"{label}: no strikes in window")
             continue
         processed.symbol = api_symbol
         processed.label = label
+        processed.prev_gamma_velocity = prev_velocity
+        processed.prev_fetch_timestamp = prev_timestamp
         symbol_data[label] = processed
 
 if not symbol_data:
@@ -896,47 +1022,141 @@ st.caption(f"Data as of {last_update}")
 
 selected_data = {k: v for k, v in symbol_data.items() if k in selected_symbols}
 
-def _render_symbol_column(data: SymbolGexData):
+def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = False):
     """Render heatmap, inference, and interpretation for one symbol in a column."""
     exp_date_str = data.exp_date.strftime("%b %d, %Y")
     fig = build_heatmap_fig(data, data.label, exp_date_str)
     st.plotly_chart(fig, use_container_width=True, key=f"heatmap_{data.label}")
 
-    st.markdown("#### Inference")
-    dir_kn = "above" if (data.king_strike and data.spot_price > data.king_strike) else "below"
-    st.metric("Distance to King Node", f"{data.dist_to_king:.0f} pts {dir_kn}" if data.dist_to_king else "—")
-    st.metric("Gatekeeper below", f"${data.nearest_gk_below:.0f}" if data.nearest_gk_below else "—")
-    st.metric("Gatekeeper above", f"${data.nearest_gk_above:.0f}" if data.nearest_gk_above else "—")
-    if data.gamma_flip_strike:
-        st.caption(f"Zero-gamma flip: ${data.gamma_flip_strike:.0f}")
+    eastern = pytz.timezone("US/Eastern")
+    now = datetime.now(eastern)
+    time_ago_str = None
+    if data.prev_fetch_timestamp is not None:
+        elapsed_sec = (now - data.prev_fetch_timestamp).total_seconds()
+        time_ago_str = _format_time_ago(elapsed_sec)
 
-    alerts = []
-    if data.king_strike:
-        dist = data.spot_price - data.king_strike
-        if dist < 0 and data.king_gex > 0:
-            alerts.append(("🟢", "Approaching strong support node"))
-        elif dist < 0 and data.king_gex < 0:
-            alerts.append(("🔴", "Approaching King Node resistance"))
-        elif dist > 0 and data.king_gex < 0:
-            alerts.append(("🔴", "Resistance overhead at King Node"))
-        elif dist > 0 and data.king_gex > 0:
-            alerts.append(("🟢", "Support below at King Node"))
-    if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
-        if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
-            alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
-    if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
-        if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
-            alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
-    if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
-        alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
-    for icon, msg in alerts[:3]:
-        st.markdown(f"{icon} {msg}")
-    if not alerts:
-        st.caption("No active alerts.")
+    if show_extended_metrics:
+        # Single-ticker: use 3-column layout for better use of horizontal space
+        col_inf, col_regime, col_velocity = st.columns(3)
+        with col_inf:
+            st.markdown("#### Inference")
+            dir_kn = "above" if (data.king_strike and data.spot_price > data.king_strike) else "below"
+            st.metric("Distance to King Node", f"{data.dist_to_king:.0f} pts {dir_kn}" if data.dist_to_king else "—")
+            st.metric("Gatekeeper below", f"${data.nearest_gk_below:.0f}" if data.nearest_gk_below else "—")
+            st.metric("Gatekeeper above", f"${data.nearest_gk_above:.0f}" if data.nearest_gk_above else "—")
+            if data.gamma_flip_strike:
+                st.caption(f"Zero-gamma flip: ${data.gamma_flip_strike:.0f}")
+        with col_regime:
+            st.markdown("#### Regime Gauge (DtF)")
+            if data.dist_to_flip_pct is not None and data.gamma_flip_strike is not None:
+                if data.dist_to_flip_pct > 1.0:
+                    color, regime = "#22c55e", "Stable / Scalp mean reversion"
+                elif data.dist_to_flip_pct >= 0.5:
+                    color, regime = "#eab308", "Transition / Caution"
+                else:
+                    color, regime = "#ef4444", "Volatile / Prepare for trending moves"
+                st.markdown(
+                    f'<p style="font-size: 1.8em; font-weight: bold; color: {color}; margin: 0;">{data.dist_to_flip_pct:.2f}%</p>'
+                    f'<p style="font-size: 0.85em; color: #666; margin: 0;">{regime}</p>',
+                    unsafe_allow_html=True,
+                )
+                st.metric("Points to Flip", f"{data.points_to_flip:.2f} pts")
+            else:
+                st.metric("Distance to Flip", "—")
+                st.metric("Points to Flip", "—")
+        with col_velocity:
+            st.markdown("#### Pressure Gauge (Velocity)")
+            if data.is_first_fetch:
+                st.metric("Gamma Velocity", "N/A (first refresh)", delta=None)
+            else:
+                vel_delta = None
+                if data.prev_gamma_velocity is not None and time_ago_str:
+                    accel = (data.gamma_delta or 0) - data.prev_gamma_velocity
+                    vel_delta = f"${accel:+.3f}B vs {time_ago_str}"
+                st.metric("Gamma Velocity", f"${data.gamma_delta:+.3f}B", delta=vel_delta)
+            if data.top_strike_velocity_strike is not None and data.top_strike_velocity_value is not None:
+                st.metric(
+                    "Top Strike Velocity",
+                    f"${data.top_strike_velocity_strike:.0f}",
+                    delta=f"${data.top_strike_velocity_value:+.3f}B",
+                )
+                caption = "Magnetic North — strike gaining gamma fastest"
+                if time_ago_str and not data.is_first_fetch:
+                    caption += f" (since {time_ago_str})"
+                st.caption(caption)
 
-    st.metric("Total GEX", f"${data.total_gex:.3f}B")
-    st.metric("Spot", f"${data.spot_price:.2f}")
-    st.metric("King Node", f"${data.king_strike:.0f}" if data.king_strike else "—")
+        # Metrics row
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("Total GEX", f"${data.total_gex:.3f}B")
+        with m2:
+            st.metric("Spot", f"${data.spot_price:.2f}")
+        with m3:
+            st.metric("King Node", f"${data.king_strike:.0f}" if data.king_strike else "—")
+
+        # Alerts
+        alerts = []
+        if data.king_strike:
+            dist = data.spot_price - data.king_strike
+            if dist < 0 and data.king_gex > 0:
+                alerts.append(("🟢", "Approaching strong support node"))
+            elif dist < 0 and data.king_gex < 0:
+                alerts.append(("🔴", "Approaching King Node resistance"))
+            elif dist > 0 and data.king_gex < 0:
+                alerts.append(("🔴", "Resistance overhead at King Node"))
+            elif dist > 0 and data.king_gex > 0:
+                alerts.append(("🟢", "Support below at King Node"))
+        if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
+            if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
+                alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
+        if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
+            if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
+                alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
+        if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
+            alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
+        if alerts:
+            st.markdown("#### Alerts")
+            for icon, msg in alerts[:3]:
+                st.markdown(f"{icon} {msg}")
+        else:
+            st.caption("No active alerts.")
+    else:
+        # Multi-ticker: vertical layout (narrow column)
+        st.markdown("#### Inference")
+        dir_kn = "above" if (data.king_strike and data.spot_price > data.king_strike) else "below"
+        st.metric("Distance to King Node", f"{data.dist_to_king:.0f} pts {dir_kn}" if data.dist_to_king else "—")
+        st.metric("Gatekeeper below", f"${data.nearest_gk_below:.0f}" if data.nearest_gk_below else "—")
+        st.metric("Gatekeeper above", f"${data.nearest_gk_above:.0f}" if data.nearest_gk_above else "—")
+        if data.gamma_flip_strike:
+            st.caption(f"Zero-gamma flip: ${data.gamma_flip_strike:.0f}")
+
+        alerts = []
+        if data.king_strike:
+            dist = data.spot_price - data.king_strike
+            if dist < 0 and data.king_gex > 0:
+                alerts.append(("🟢", "Approaching strong support node"))
+            elif dist < 0 and data.king_gex < 0:
+                alerts.append(("🔴", "Approaching King Node resistance"))
+            elif dist > 0 and data.king_gex < 0:
+                alerts.append(("🔴", "Resistance overhead at King Node"))
+            elif dist > 0 and data.king_gex > 0:
+                alerts.append(("🟢", "Support below at King Node"))
+        if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
+            if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
+                alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
+        if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
+            if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
+                alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
+        if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
+            alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
+        for icon, msg in alerts[:3]:
+            st.markdown(f"{icon} {msg}")
+        if not alerts:
+            st.caption("No active alerts.")
+
+        st.metric("Total GEX", f"${data.total_gex:.3f}B")
+        st.metric("Spot", f"${data.spot_price:.2f}")
+        st.metric("King Node", f"${data.king_strike:.0f}" if data.king_strike else "—")
 
     interp = generate_gex_interpretation(
         data.spot_price, data.total_gex, data.king_strike,
@@ -984,7 +1204,7 @@ for j, label in enumerate(selected_symbols):
     with cols[j]:
         st.markdown(f"### {label}")
         if label in symbol_data:
-            _render_symbol_column(symbol_data[label])
+            _render_symbol_column(symbol_data[label], show_extended_metrics=(len(selected_symbols) == 1))
         else:
             st.info(f"No data for {label}. Check fetch errors above.")
 
@@ -1008,7 +1228,9 @@ if "llm_interpretation" not in st.session_state:
 if os.environ.get("GEMINI_API_KEY"):
     if st.button("Generate", key="gen_interpretation"):
         with st.spinner("Generating AI interpretation..."):
-            st.session_state.llm_interpretation = generate_llm_interpretation(selected_data, confluence)
+            st.session_state.llm_interpretation = generate_llm_interpretation(
+                selected_data, confluence, is_single_ticker=(len(selected_symbols) == 1)
+            )
     llm_text = st.session_state.llm_interpretation
 else:
     llm_text = None
