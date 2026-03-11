@@ -442,10 +442,12 @@ def process_symbol_gex(
     nearest_gk_below = min((s for s in gatekeeper_strikes if s < spot_price), key=lambda x: spot_price - x, default=None)
     nearest_gk_above = min((s for s in gatekeeper_strikes if s > spot_price), key=lambda x: x - spot_price, default=None)
 
-    strikes_asc = sorted(strikes)
+    # Gamma flip: use full chain (all_strikes) so cumulative can cross zero.
+    # Strikes_in_window may be too narrow—zero-crossing often occurs at far OTM strikes.
+    all_strikes_asc = sorted(all_strikes)
     prev_cum, cum = 0, 0
     gamma_flip_strike = None
-    for s in strikes_asc:
+    for s in all_strikes_asc:
         prev_cum = cum
         cum += per_strike_gex[s]
         if prev_cum != 0 and (prev_cum > 0) != (cum > 0):
