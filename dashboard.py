@@ -8,20 +8,26 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+import csv
+import json
 import os
 import time
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-import json
 from typing import Dict, List, Optional, Tuple
 
-import csv
-import urllib.request
-
 import numpy as np
+import plotly.graph_objects as go
 import pytz
 import streamlit as st
-import plotly.graph_objects as go
+
+from main import (
+    _load_broker_client,
+    BrokerConfigurationError,
+    GammaExposureScheduler,
+)
+from gamma_analysis import calculate_gamma_exposure, get_per_strike_details
 
 SP500_CSV_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
 
@@ -43,6 +49,16 @@ def _format_time_ago(seconds: float) -> str:
     return f"{days}d ago"
 
 
+def _escape_for_display(s: str) -> str:
+    """Escape text for safe HTML display (avoids LaTeX $ and HTML injection)."""
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("$", "&#36;")
+    )
+
+
 @st.cache_data(ttl=86400)
 def get_sp500_symbols() -> List[str]:
     """Fetch S&P 500 constituent symbols. Returns sorted list of tickers."""
@@ -58,14 +74,6 @@ def get_sp500_symbols() -> List[str]:
 def display_to_api_symbol(label: str) -> str:
     """Map display label to API symbol (Schwab uses $SPX for the index)."""
     return "$SPX" if label == "SPX" else label
-
-
-from main import (
-    _load_broker_client,
-    BrokerConfigurationError,
-    GammaExposureScheduler,
-)
-from gamma_analysis import calculate_gamma_exposure, get_per_strike_details
 
 
 # --- Session-state client (persist across reruns) ---
@@ -1028,6 +1036,31 @@ st.caption(f"Data as of {last_update}")
 
 selected_data = {k: v for k, v in symbol_data.items() if k in selected_symbols}
 
+
+def _build_alerts(data: SymbolGexData) -> List[Tuple[str, str]]:
+    """Return a list of (icon, message) alert tuples for the given symbol data."""
+    alerts = []
+    if data.king_strike:
+        dist = data.spot_price - data.king_strike
+        if dist < 0 and data.king_gex > 0:
+            alerts.append(("🟢", "Approaching strong support node"))
+        elif dist < 0 and data.king_gex < 0:
+            alerts.append(("🔴", "Approaching King Node resistance"))
+        elif dist > 0 and data.king_gex < 0:
+            alerts.append(("🔴", "Resistance overhead at King Node"))
+        elif dist > 0 and data.king_gex > 0:
+            alerts.append(("🟢", "Support below at King Node"))
+    if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
+        if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
+            alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
+    if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
+        if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
+            alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
+    if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
+        alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
+    return alerts
+
+
 def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = False):
     """Render heatmap, inference, and interpretation for one symbol in a column."""
     exp_date_str = data.exp_date.strftime("%b %d, %Y")
@@ -1101,25 +1134,7 @@ def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = Fal
             st.metric("King Node", f"${data.king_strike:.0f}" if data.king_strike else "—")
 
         # Alerts
-        alerts = []
-        if data.king_strike:
-            dist = data.spot_price - data.king_strike
-            if dist < 0 and data.king_gex > 0:
-                alerts.append(("🟢", "Approaching strong support node"))
-            elif dist < 0 and data.king_gex < 0:
-                alerts.append(("🔴", "Approaching King Node resistance"))
-            elif dist > 0 and data.king_gex < 0:
-                alerts.append(("🔴", "Resistance overhead at King Node"))
-            elif dist > 0 and data.king_gex > 0:
-                alerts.append(("🟢", "Support below at King Node"))
-        if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
-            if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
-                alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
-        if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
-            if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
-                alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
-        if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
-            alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
+        alerts = _build_alerts(data)
         if alerts:
             st.markdown("#### Alerts")
             for icon, msg in alerts[:3]:
@@ -1136,25 +1151,7 @@ def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = Fal
         if data.gamma_flip_strike:
             st.caption(f"Zero-gamma flip: ${data.gamma_flip_strike:.0f}")
 
-        alerts = []
-        if data.king_strike:
-            dist = data.spot_price - data.king_strike
-            if dist < 0 and data.king_gex > 0:
-                alerts.append(("🟢", "Approaching strong support node"))
-            elif dist < 0 and data.king_gex < 0:
-                alerts.append(("🔴", "Approaching King Node resistance"))
-            elif dist > 0 and data.king_gex < 0:
-                alerts.append(("🔴", "Resistance overhead at King Node"))
-            elif dist > 0 and data.king_gex > 0:
-                alerts.append(("🟢", "Support below at King Node"))
-        if data.nearest_gk_below and data.per_strike_gex.get(data.nearest_gk_below, 0) > 0:
-            if (data.spot_price - data.nearest_gk_below) < data.spot_price * 0.02:
-                alerts.append(("🟢", f"Near downside defense (${data.nearest_gk_below:.0f})"))
-        if data.nearest_gk_above and data.per_strike_gex.get(data.nearest_gk_above, 0) < 0:
-            if (data.nearest_gk_above - data.spot_price) < data.spot_price * 0.02:
-                alerts.append(("🔴", f"Resistance overhead (${data.nearest_gk_above:.0f})"))
-        if data.gamma_flip_strike and abs(data.spot_price - data.gamma_flip_strike) < data.spot_price * 0.015:
-            alerts.append(("🟡", f"Near zero-gamma flip (${data.gamma_flip_strike:.0f})"))
+        alerts = _build_alerts(data)
         for icon, msg in alerts[:3]:
             st.markdown(f"{icon} {msg}")
         if not alerts:
@@ -1242,14 +1239,6 @@ else:
     llm_text = None
 
 if llm_text:
-    # Escape for safe HTML display: $ (LaTeX), < > & (HTML entities)
-    def _escape_for_display(s: str) -> str:
-        return (
-            s.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("$", "&#36;")
-        )
     escaped = _escape_for_display(llm_text)
     st.markdown(
         "<div style='line-height: 1.6; font-size: 0.95em; white-space: pre-wrap; overflow-y: auto; max-height: 70vh;'>"

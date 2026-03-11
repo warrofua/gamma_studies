@@ -7,6 +7,8 @@ import numpy as np
 
 # Adjust global font size
 mpl.rcParams.update({'font.size': mpl.rcParams['font.size'] - 4})
+
+
 class RealTimeGammaPlotter:
     def __init__(self):
         plt.ion()  # Turn on interactive mode
