@@ -525,9 +525,9 @@ def build_heatmap_fig(
     max_abs = max(abs(g) for g in gex_values) if gex_values else 1
 
     # Normalize y to [0, y_domain_max] so all heatmaps have same visual scale (SPX/SPY/QQQ)
-    # Low strike prices at bottom, high strike prices at top
+    # Low strike prices at bottom, high strike prices at top (strikes are ordered high->low)
     n = len(strikes)
-    y_positions = np.linspace(0, y_domain_max, n) if n > 1 else np.array([y_domain_max / 2])
+    y_positions = np.linspace(y_domain_max, 0, n) if n > 1 else np.array([y_domain_max / 2])
     strike_to_y = {s: y_positions[i] for i, s in enumerate(strikes)}
 
     z = np.array([[g] for g in gex_values])
@@ -800,7 +800,7 @@ def generate_llm_interpretation(
     symbols_str = ", ".join(symbol_data.keys())
 
     if is_single_ticker:
-        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader for TODAY ({today}) on **day-trading** a single underlying: {symbols_str}. The user has the following GEX data including regime and velocity metrics.
+        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader in **real time** on a single underlying: {symbols_str}. This is a snapshot as of {today}—the user may regenerate this interpretation multiple times per day. Focus on a **near-term (next few hours)** outlook, not a full-day forecast. GEX levels and nodes shift throughout the day in response to market conditions; your interpretation reflects current conditions only. The user is likely trading 0DTE options, so every day is an expiry day—do not reference expiry in your output. The user has the following GEX data including regime and velocity metrics.
 
 GEX DATA (JSON):
 ```
@@ -821,16 +821,18 @@ DEFINITIONS:
 - **Gamma Velocity**: Change in total GEX since last refresh. Positive = gamma being added (dealers accumulating), negative = gamma being shed.
 - **Top Strike Velocity**: The strike gaining gamma fastest. Acts as "Magnetic North"—price may gravitate toward it as dealers hedge.
 
-TASK: Write a concise, actionable interpretation (4–6 short paragraphs) that gives **clear day-trading recommendations** for this setup. Include:
+IMPORTANT: Some fields in the JSON may be null (e.g., regime_gauge, gamma_velocity, gamma_flip_strike). This is normal—those metrics are not always computable. Base your analysis and recommendations ONLY on the data that is present. Do not mention missing data, complain about it, or suggest the analysis is incomplete. Use what you have to give actionable guidance.
 
-1. **Regime analysis**: What does the DtF (Distance-to-Flip) and regime tell you? Is this a scalp/mean-reversion environment or a trending environment?
-2. **Velocity analysis**: What does gamma velocity imply? Is the Top Strike Velocity (magnetic north) relevant for entries or targets?
-3. **Concrete recommendations**: Entry, stop, and target levels. Reference actual strikes and distances.
-4. **When to trade vs. when to stay away**: If the setup is poor (e.g., volatile regime, near flip, mixed signals, low conviction), say so clearly and recommend staying flat or reducing size. Do not force a trade when the data suggests caution.
+TASK: Write a concise, actionable interpretation (4–6 short paragraphs) that gives **clear near-term (next few hours) recommendations** for this setup. Include only sections for which you have data:
+
+1. **Regime analysis** (if regime_gauge or gamma_flip_strike present): What does the DtF and regime tell you? Otherwise, infer regime from total GEX sign and King Node placement.
+2. **Velocity analysis** (if gamma_velocity present): What does gamma velocity imply? Is Top Strike Velocity relevant? Skip if absent.
+3. **Concrete recommendations**: Entry, stop, and target levels. Reference actual strikes and distances from available data.
+4. **When to trade vs. when to stay away**: If the setup is poor (mixed signals, low conviction), say so. Do not force a trade when the data suggests caution.
 
 Use plain language. Reference actual numbers (strikes, distances, percentages). Give clear directional bias when the data supports it; give clear "stay away" or "reduce size" advice when it does not."""
     else:
-        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader for TODAY ({today}) based on the following gamma exposure (GEX) data for {symbols_str}. These underlyings are highly correlated: SPX is the S&P 500 index, SPY tracks it at ~1/10 scale, QQQ is tech-heavy.
+        prompt = f"""You are an options market maker and gamma exposure expert. You are advising a trader in **real time** based on the following gamma exposure (GEX) data for {symbols_str}. This is a snapshot as of {today}—the user may regenerate this interpretation multiple times per day. Focus on a **near-term (next few hours)** outlook, not a full-day forecast. GEX levels and nodes shift throughout the day in response to market conditions; your interpretation reflects current conditions only. The user is likely trading 0DTE options, so every day is an expiry day—do not reference expiry in your output. These underlyings are highly correlated: SPX is the S&P 500 index, SPY tracks it at ~1/10 scale, QQQ is tech-heavy.
 
 GEX DATA (JSON):
 ```
@@ -846,13 +848,15 @@ DEFINITIONS:
 - **Upside resistance** = resistance levels (negative GEX above spot)
 - **Total GEX** > 0: dealers long gamma → mean reversion, dampened moves
 - **Total GEX** < 0: dealers short gamma → momentum can extend
-- **Gamma flip strike** = level where cumulative gamma flips sign
+- **Gamma flip strike** = level where cumulative gamma flips sign (may be null if not computable from the chain)
 
-TASK: Write a concise, actionable interpretation (3–5 short paragraphs) that guides the user on **how to think about buying and selling** at the current spot prices today. Be specific:
+IMPORTANT: Some fields may be null (e.g., gamma_flip_strike, regime_gauge). This is normal. Base your analysis and recommendations ONLY on the data that is present. Do not mention missing data, complain about it, or suggest the analysis is incomplete. Evaluate market conditions and make recommendations using whatever data is available.
+
+TASK: Write a concise, actionable interpretation (3–5 short paragraphs) that guides the user on **how to think about buying and selling** over the next few hours given current spot prices. Be specific:
 1. For each symbol with data: Is spot near support or resistance? Should they lean long, short, or neutral?
 2. What concrete levels should they watch for entries, stops, and targets?
 3. What does confluence across symbols imply for conviction?
-4. Any caveats (e.g., near expiry, mixed signals)?
+4. Any caveats (e.g., mixed signals)?
 
 Use plain language. Reference actual numbers (strikes, distances). Do not hedge with disclaimers; give clear directional bias where the data supports it."""
 
