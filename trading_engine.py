@@ -27,9 +27,12 @@ from gex_utils import SymbolGexData, fetch_options_and_gex, process_symbol_gex
 from main import GammaExposureScheduler
 from position_manager import OpenPosition, PositionManager
 from signal_engine import SignalResult, evaluate
+import eod_report as _eod_report
 from trade_journal import (
     compute_daily_summary,
     delete_position,
+    eod_report_exists,
+    get_trade_count_for_date,
     init_db,
     insert_trade,
     set_engine_state,
@@ -280,6 +283,9 @@ def _execute_entry(
         "regime_at_exit": None,
         "tranche": "full",
         "hold_seconds": None,
+        "capital_risked": round(pos.entry_price * pos.total_qty * 100 * cfg.initial_stop_pct, 2),
+        "initial_stop_price": pos.current_stop,
+        "parent_trade_id": None,
     })
     upsert_position(_position_to_dict(pos))
 
@@ -389,6 +395,9 @@ def _execute_partial_close(
         "regime_at_exit": None,
         "tranche": "A",
         "hold_seconds": int((datetime.now(_ET) - pos.entry_time).total_seconds()),
+        "capital_risked": round(pos.entry_price * pos.total_qty * 100 * pm.cfg.initial_stop_pct, 2),
+        "initial_stop_price": round(pos.entry_price * (1 - pm.cfg.initial_stop_pct), 2),
+        "parent_trade_id": pos.trade_id,
     })
 
     upsert_position(_position_to_dict(pos))
@@ -420,6 +429,51 @@ def _flush_positions_to_journal(pm: PositionManager, reason: str) -> None:
         )
         delete_position(pos.trade_id)
     pm.positions.clear()
+
+
+# ---------------------------------------------------------------------------
+# EOD report trigger
+# ---------------------------------------------------------------------------
+
+def _maybe_generate_eod_report(pm: PositionManager, cfg) -> None:
+    """Generate EOD report if: after market close, no report yet today, ≥1 trade.
+
+    Idempotent — safe to call on every engine shutdown. Skips silently if the
+    engine stopped before market close or if no trades were taken today.
+    """
+    now_et = datetime.now(_ET)
+    hc_h, hc_m = map(int, cfg.hard_close_time.split(":"))
+    hard_close_dt = now_et.replace(hour=hc_h, minute=hc_m, second=0, microsecond=0)
+
+    if now_et < hard_close_dt:
+        logger.info("[Engine] EOD report skipped — engine stopped before market close.")
+        return
+
+    today_str = date.today().isoformat()
+
+    if eod_report_exists(today_str):
+        logger.info("[Engine] EOD report already exists for %s — skipping.", today_str)
+        return
+
+    trade_count = get_trade_count_for_date(today_str)
+    if trade_count == 0:
+        logger.info("[Engine] EOD report skipped — no trades today.")
+        return
+
+    logger.info("[Engine] Generating EOD report for %s (%d trades)...", today_str, trade_count)
+    try:
+        report = _eod_report.generate_session_report(today_str)
+        _eod_report.store_report(report)
+        _eod_report.log_report(report)
+        _eod_report.notify_email(report)
+        logger.info(
+            "[Engine] EOD report complete — P&L: %s | trades: %d | avg R: %s",
+            _eod_report._fmt_pnl(report.total_pnl),
+            report.trade_count,
+            _eod_report.fmt_r(report.avg_r),
+        )
+    except Exception as exc:
+        logger.error("[Engine] EOD report generation failed: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +809,8 @@ def main() -> None:
         "[Engine] Final summary — Trades today: %d | Realized P&L: $%.2f",
         trades, total_pnl,
     )
+
+    _maybe_generate_eod_report(pm, cfg)
     logger.info("[Engine] Stopped.")
 
 

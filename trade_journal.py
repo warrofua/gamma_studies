@@ -92,6 +92,31 @@ def init_db() -> None:
             conn.execute("ALTER TABLE positions ADD COLUMN current_price REAL")
         except Exception:
             pass  # column already exists
+
+        # Migration: add capital risk and tranche linkage columns to trades
+        for _col, _coltype in [
+            ("capital_risked", "REAL"),
+            ("initial_stop_price", "REAL"),
+            ("parent_trade_id", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {_col} {_coltype}")
+            except Exception:
+                pass  # column already exists
+
+        # Cache table for EOD reports (also serves as idempotency lock)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS eod_reports (
+                date          TEXT PRIMARY KEY,
+                report_json   TEXT,
+                generated_at  TEXT
+            )
+        """)
+
+        # Index for date-range queries on trades (weekly/monthly P&L)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(date)"
+        )
         conn.commit()
 
 
@@ -316,6 +341,89 @@ def store_spy_snapshot(data_json: dict, fetched_at: datetime) -> None:
         )
         conn.commit()
 
+
+# ---------------------------------------------------------------------------
+# EOD report store (idempotency lock + dashboard cache)
+# ---------------------------------------------------------------------------
+
+def eod_report_exists(date_str: str) -> bool:
+    """Return True if an EOD report has already been generated for date_str."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "SELECT 1 FROM eod_reports WHERE date = ?", (date_str,)
+        )
+        return cursor.fetchone() is not None
+
+
+def upsert_eod_report(date_str: str, report_json: str) -> None:
+    """INSERT OR REPLACE the EOD report JSON for a given date."""
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO eod_reports (date, report_json, generated_at)
+               VALUES (?, ?, ?)""",
+            (date_str, report_json, now),
+        )
+        conn.commit()
+
+
+def get_eod_report(date_str: str) -> dict | None:
+    """Return the cached EOD report for date_str, or None if not found / malformed."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "SELECT report_json FROM eod_reports WHERE date = ?", (date_str,)
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def get_trade_count_for_date(date_str: str) -> int:
+    """Count entry rows (tranche='full') for date_str. Avoids double-counting tranche A rows."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE date = ? AND tranche = 'full'",
+            (date_str,),
+        )
+        return cursor.fetchone()[0] or 0
+
+
+def get_weekly_pnl(date_str: str) -> float:
+    """Sum realized_pnl for closed trades from Monday of date_str's week through date_str."""
+    from datetime import timedelta
+    d = date.fromisoformat(date_str)
+    monday = d - timedelta(days=d.weekday())
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """SELECT COALESCE(SUM(realized_pnl), 0.0)
+               FROM trades
+               WHERE date >= ? AND date <= ? AND exit_time IS NOT NULL""",
+            (monday.isoformat(), date_str),
+        )
+        return float(cursor.fetchone()[0] or 0.0)
+
+
+def get_monthly_pnl(date_str: str) -> float:
+    """Sum realized_pnl for closed trades from 1st of month through date_str."""
+    d = date.fromisoformat(date_str)
+    first_of_month = d.replace(day=1)
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """SELECT COALESCE(SUM(realized_pnl), 0.0)
+               FROM trades
+               WHERE date >= ? AND date <= ? AND exit_time IS NOT NULL""",
+            (first_of_month.isoformat(), date_str),
+        )
+        return float(cursor.fetchone()[0] or 0.0)
+
+
+# ---------------------------------------------------------------------------
+# SPY GEX snapshot store (for backtesting)
+# ---------------------------------------------------------------------------
 
 def load_spy_snapshots(start: date, end: date) -> List[Tuple[int, dict, datetime]]:
     """Return SPY snapshots with fetched_at between start and end (inclusive), oldest first."""

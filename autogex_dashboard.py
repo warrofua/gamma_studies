@@ -17,12 +17,17 @@ from datetime import datetime, date, timedelta, time as dtime
 import pytz
 import streamlit as st
 
+import eod_report as _eod_report
 from trade_journal import (
-    get_open_positions,
-    get_engine_state,
-    set_engine_state,
-    get_trades_for_date,
+    eod_report_exists,
     get_daily_summary,
+    get_eod_report,
+    get_engine_state,
+    get_monthly_pnl,
+    get_open_positions,
+    get_trades_for_date,
+    get_weekly_pnl,
+    set_engine_state,
     compute_daily_summary,
 )
 from config import load_config, save_config, AutoGexConfig
@@ -702,6 +707,340 @@ def _render_controls() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Row 6 — Reports tab
+# ---------------------------------------------------------------------------
+
+def _fmt_r_display(r) -> str:
+    """Format R-multiple for display in the dashboard."""
+    if r is None:
+        return "N/A"
+    sign = "+" if r >= 0 else ""
+    return f"{sign}{r:.1f}R"
+
+
+def _outcome_label(exit_reason: str) -> str:
+    if exit_reason == "ran":
+        return "✅ ran"
+    if exit_reason == "stop_out":
+        return "🛑 stop"
+    if exit_reason == "hard_close":
+        return "🔔 EOD"
+    return exit_reason or "—"
+
+
+def _render_session_view(date_str: str) -> None:
+    import pandas as pd
+
+    now_et = _et_now()
+    today_str = date.today().isoformat()
+    is_today = date_str == today_str
+
+    raw_trades = get_trades_for_date(date_str)
+    open_positions = get_open_positions() if is_today else []
+
+    if not raw_trades and not open_positions:
+        st.info(f"No trades on {date_str}.")
+        return
+
+    # Session status banner
+    market_closed = now_et.hour > 15 or (now_et.hour == 15 and now_et.minute >= 55)
+    if is_today and not market_closed:
+        st.markdown(
+            f'<div style="color:#28a745; font-weight:bold; margin-bottom:8px">'
+            f'🟢 Session in progress — {now_et.strftime("%H:%M:%S")} ET</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div style="color:#6c757d; font-weight:bold; margin-bottom:8px">'
+            f'✅ Session closed — {date_str}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Build combined trade view
+    combined = _eod_report.group_trades_by_trade_id(raw_trades)
+
+    # Summary metrics
+    total_pnl = sum(t.total_pnl for t in combined)
+    total_risked = sum(t.capital_risked for t in combined)
+    wins = [t for t in combined if t.total_pnl > 0]
+    r_vals = [
+        _eod_report.safe_r_multiple(t.total_pnl, t.capital_risked)
+        for t in combined
+    ]
+    valid_rs = [r for r in r_vals if r is not None]
+    avg_r = round(sum(valid_rs) / len(valid_rs), 2) if valid_rs else None
+    win_rate = len(wins) / len(combined) * 100 if combined else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    pnl_color = "#28a745" if total_pnl >= 0 else "#dc3545"
+    with m1:
+        st.caption("Daily P&L")
+        st.markdown(
+            f'<span style="color:{pnl_color}; font-size:1.3em; font-weight:bold">'
+            f'{_pnl_str(total_pnl)}</span>',
+            unsafe_allow_html=True,
+        )
+    with m2:
+        st.caption("Win Rate")
+        st.markdown(
+            f'<span style="font-size:1.3em; font-weight:bold">'
+            f'{win_rate:.0f}%</span>' if combined else "—",
+            unsafe_allow_html=True,
+        )
+    with m3:
+        st.caption("Capital Risked")
+        st.markdown(
+            f'<span style="font-size:1.3em; font-weight:bold">'
+            f'${total_risked:,.0f}</span>',
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.caption("Avg R")
+        st.markdown(
+            f'<span style="font-size:1.3em; font-weight:bold">'
+            f'{_fmt_r_display(avg_r)}</span>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # Closed trades table + tranche expanders
+    if combined:
+        st.markdown("**Closed Trades**")
+        rows = []
+        for t in combined:
+            r_val = _eod_report.safe_r_multiple(t.total_pnl, t.capital_risked)
+            try:
+                entry_dt = datetime.fromisoformat(t.entry_time)
+                time_str = entry_dt.strftime("%H:%M:%S")
+            except Exception:
+                time_str = t.entry_time or "—"
+
+            rows.append({
+                "Time": time_str,
+                "Dir": t.direction,
+                "Strike": t.strike,
+                "Entry $": t.entry_price,
+                "Exit $ (avg)": t.avg_exit_price,
+                "P&L": t.total_pnl,
+                "R-Mult": _fmt_r_display(r_val),
+                "Risked $": t.capital_risked if t.capital_risked > 0 else None,
+                "Conviction": t.conviction,
+                "Hold": _fmt_hold(t.hold_seconds),
+                "Outcome": _outcome_label(t.exit_reason),
+            })
+
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "P&L": st.column_config.NumberColumn("P&L", format="$%.2f"),
+                "Entry $": st.column_config.NumberColumn("Entry $", format="$%.2f"),
+                "Exit $ (avg)": st.column_config.NumberColumn("Exit $ (avg)", format="$%.2f"),
+                "Risked $": st.column_config.NumberColumn("Risked $", format="$%.0f"),
+                "Strike": st.column_config.NumberColumn("Strike", format="%.0f"),
+            },
+        )
+
+        # Tranche detail expanders (only for two-tranche trades)
+        for t in combined:
+            if len(t.tranches) > 1:
+                label = f"▶ {t.direction} {t.strike:.0f} — {len(t.tranches)} exits"
+                with st.expander(label):
+                    for tr in t.tranches:
+                        tr_label = tr.get("tranche", "?")
+                        tr_exit = tr.get("exit_price")
+                        tr_pnl = tr.get("realized_pnl")
+                        tr_reason = tr.get("exit_reason") or "—"
+                        tr_qty = tr.get("exit_qty") or tr.get("entry_qty") or "?"
+                        if tr_exit is not None and tr_pnl is not None:
+                            st.markdown(
+                                f"&nbsp;&nbsp;**Tranche {tr_label}:** {tr_qty}ct "
+                                f"@ ${float(tr_exit):.2f} → "
+                                f"{_pnl_str(float(tr_pnl))} — {tr_reason}"
+                            )
+                        else:
+                            st.markdown(f"&nbsp;&nbsp;**Tranche {tr_label}:** open")
+
+        # CSV export
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export CSV",
+            data=csv_bytes,
+            file_name=f"autogex_{date_str}.csv",
+            mime="text/csv",
+            disabled=len(df) == 0,
+            key=f"export_session_{date_str}",
+        )
+
+    # Open positions (live session only)
+    if open_positions:
+        st.markdown("**Open Positions**")
+        for pos in open_positions:
+            direction = pos.get("direction", "")
+            icon = "📈" if direction == "CALL" else "📉"
+            entry_p = pos.get("entry_price", 0.0) or 0.0
+            stop_p = pos.get("current_stop", 0.0) or 0.0
+            st.markdown(
+                f"&nbsp;&nbsp;{icon} **{direction}** {pos.get('symbol', '—')} "
+                f"@ ${pos.get('strike', '?')} "
+                f"| Entry: ${entry_p:.2f} | Stop: ${stop_p:.2f} | 🔴 OPEN"
+            )
+
+
+def _render_weekly_view(date_str: str) -> None:
+    import pandas as pd
+
+    d = date.fromisoformat(date_str)
+    monday = d - timedelta(days=d.weekday())
+    friday = monday + timedelta(days=4)
+
+    weekly_pnl = get_weekly_pnl(date_str)
+    color = "#28a745" if weekly_pnl >= 0 else "#dc3545"
+
+    st.markdown(f"**Week of {monday.strftime('%b %d')} — {friday.strftime('%b %d, %Y')}**")
+    st.markdown(
+        f'<span style="color:{color}; font-size:1.4em; font-weight:bold">'
+        f'Weekly P&L: {_pnl_str(weekly_pnl)}</span>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
+
+    # Day-by-day breakdown
+    summaries = []
+    cursor = monday
+    while cursor <= d:
+        s = get_daily_summary(cursor.isoformat())
+        if s:
+            tc = s.get("trade_count", 0)
+            wc = s.get("win_count", 0)
+            summaries.append({
+                "Date": cursor.isoformat(),
+                "P&L": s.get("total_pnl", 0.0),
+                "Trades": tc,
+                "Win Rate": f"{wc/tc*100:.0f}%" if tc > 0 else "—",
+                "Avg Winner": s.get("avg_winner", 0.0) or None,
+                "Avg Loser": s.get("avg_loser", 0.0) or None,
+                "Largest Win": s.get("largest_win", 0.0) or None,
+                "Largest Loss": s.get("largest_loss", 0.0) or None,
+            })
+        cursor += timedelta(days=1)
+
+    if summaries:
+        df = pd.DataFrame(summaries)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "P&L": st.column_config.NumberColumn("P&L", format="$%.2f"),
+                "Avg Winner": st.column_config.NumberColumn("Avg Winner", format="$%.2f"),
+                "Avg Loser": st.column_config.NumberColumn("Avg Loser", format="$%.2f"),
+                "Largest Win": st.column_config.NumberColumn("Largest Win", format="$%.2f"),
+                "Largest Loss": st.column_config.NumberColumn("Largest Loss", format="$%.2f"),
+            },
+        )
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export Weekly CSV",
+            data=csv_bytes,
+            file_name=f"autogex_week_{monday.isoformat()}.csv",
+            mime="text/csv",
+            key=f"export_weekly_{date_str}",
+        )
+    else:
+        st.info("No trading data for this week.")
+
+
+def _render_monthly_view(date_str: str) -> None:
+    import pandas as pd
+
+    d = date.fromisoformat(date_str)
+    first_of_month = d.replace(day=1)
+
+    monthly_pnl = get_monthly_pnl(date_str)
+    color = "#28a745" if monthly_pnl >= 0 else "#dc3545"
+
+    st.markdown(f"**{d.strftime('%B %Y')}**")
+    st.markdown(
+        f'<span style="color:{color}; font-size:1.4em; font-weight:bold">'
+        f'Monthly P&L: {_pnl_str(monthly_pnl)}</span>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
+
+    # Day-by-day breakdown for the month
+    summaries = []
+    cursor = first_of_month
+    while cursor <= d:
+        s = get_daily_summary(cursor.isoformat())
+        if s and s.get("trade_count", 0) > 0:
+            tc = s.get("trade_count", 0)
+            wc = s.get("win_count", 0)
+            summaries.append({
+                "Date": cursor.isoformat(),
+                "P&L": s.get("total_pnl", 0.0),
+                "Trades": tc,
+                "Win Rate": f"{wc/tc*100:.0f}%" if tc > 0 else "—",
+                "Largest Win": s.get("largest_win", 0.0) or None,
+                "Largest Loss": s.get("largest_loss", 0.0) or None,
+            })
+        cursor += timedelta(days=1)
+
+    if summaries:
+        df = pd.DataFrame(summaries)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "P&L": st.column_config.NumberColumn("P&L", format="$%.2f"),
+                "Largest Win": st.column_config.NumberColumn("Largest Win", format="$%.2f"),
+                "Largest Loss": st.column_config.NumberColumn("Largest Loss", format="$%.2f"),
+            },
+        )
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export Monthly CSV",
+            data=csv_bytes,
+            file_name=f"autogex_{d.strftime('%Y-%m')}.csv",
+            mime="text/csv",
+            key=f"export_monthly_{date_str}",
+        )
+    else:
+        st.info("No trading data for this month.")
+
+
+def _render_reports_tab() -> None:
+    """Reports tab: session view (live + EOD), weekly, and monthly P&L."""
+    today = date.today()
+
+    selected_date = st.date_input(
+        "Session date",
+        value=today,
+        max_value=today,
+        key="reports_date_selector",
+    )
+    date_str = selected_date.isoformat()
+
+    tab_session, tab_weekly, tab_monthly = st.tabs(
+        ["📅 Today's Session", "📆 Weekly", "🗓 Monthly"]
+    )
+
+    with tab_session:
+        _render_session_view(date_str)
+
+    with tab_weekly:
+        _render_weekly_view(date_str)
+
+    with tab_monthly:
+        _render_monthly_view(date_str)
+
+
+# ---------------------------------------------------------------------------
 # Main render functions
 # ---------------------------------------------------------------------------
 
@@ -735,11 +1074,7 @@ def render_autogex_view() -> None:
     """Render the complete AutoGEX trading view."""
     st.title("AutoGEX Trading View")
 
-    # --- Row 1: Status bar ---
-    _render_status_bar()
-    st.markdown("---")
-
-    # Pre-fetch last_signal_json once (used in row 1 regime and row 2 signal panel)
+    # Fetch last_signal_json once — used by both the Live tab status bar and signal panel
     last_signal_raw = get_engine_state("last_signal_json", {})
     if isinstance(last_signal_raw, str):
         try:
@@ -748,20 +1083,30 @@ def render_autogex_view() -> None:
             last_signal_raw = {}
     last_signal: dict = last_signal_raw if isinstance(last_signal_raw, dict) else {}
 
-    # --- Row 2: Positions + Signal ---
-    _render_positions_and_signals(last_signal)
-    st.markdown("---")
+    tab_live, tab_reports = st.tabs(["🔴 Live", "📊 Reports"])
 
-    # --- Row 3: Trade log ---
-    _render_trade_log()
-    st.markdown("---")
+    with tab_live:
+        # --- Row 1: Status bar ---
+        _render_status_bar()
+        st.markdown("---")
 
-    # --- Row 4: Performance metrics ---
-    _render_performance_metrics()
-    st.markdown("---")
+        # --- Row 2: Positions + Signal ---
+        _render_positions_and_signals(last_signal)
+        st.markdown("---")
 
-    # --- Row 5: Controls ---
-    _render_controls()
+        # --- Row 3: Trade log ---
+        _render_trade_log()
+        st.markdown("---")
+
+        # --- Row 4: Performance metrics ---
+        _render_performance_metrics()
+        st.markdown("---")
+
+        # --- Row 5: Controls ---
+        _render_controls()
+
+    with tab_reports:
+        _render_reports_tab()
 
     # --- Auto-refresh ---
     st.markdown("---")
