@@ -643,6 +643,17 @@ if client is None:
     st.stop()
 
 with st.sidebar:
+    view_mode = st.radio(
+        "Mode",
+        options=["GEX Dashboard", "AutoGEX Trading"],
+        index=0,
+        key="view_mode",
+        horizontal=False,
+    )
+    if view_mode == "AutoGEX Trading":
+        from autogex_dashboard import render_autogex_view
+        render_autogex_view()
+        st.stop()
     st.title("Gamma Exposure")
     if not os.environ.get("GEMINI_API_KEY"):
         st.caption("💡 Set GEMINI_API_KEY in .env for AI interpretation")
