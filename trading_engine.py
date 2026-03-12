@@ -167,6 +167,7 @@ def _position_to_dict(pos: OpenPosition) -> dict:
         "conviction": pos.entry_conviction,
         "signals_json": _json.dumps(pos.entry_signals),
         "gex_entry_json": None,  # set at entry time by caller if desired
+        "current_price": pos.current_price,
     }
 
 
@@ -539,6 +540,9 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: A
                 continue
             current_price = quote['mid']
 
+        pos.current_price = current_price
+        upsert_position(_position_to_dict(pos))
+
         actions = pm.evaluate_position(pos, current_price, data.spot_price)
 
         for action in actions:
@@ -630,12 +634,57 @@ def main() -> None:
     # --- Position manager ---
     pm = PositionManager(cfg)
 
-    # On restart, reconcile Alpaca positions with engine state
+    # On restart, restore open positions from DB back into pm.positions
     from trade_journal import get_open_positions as _get_db_positions
     db_positions = _get_db_positions()
     if db_positions:
-        logger.info("[Engine] Found %d open position(s) in journal from previous session", len(db_positions))
-        alpaca.reconcile_positions(pm.positions)
+        logger.info("[Engine] Found %d open position(s) in journal — restoring to position manager", len(db_positions))
+        for _row in db_positions:
+            try:
+                _total_qty = int(_row.get("total_qty") or 0)
+                _tranche_a_qty = _total_qty // 2
+                _entry_time_raw = _row.get("entry_time") or ""
+                _entry_time = datetime.fromisoformat(_entry_time_raw) if _entry_time_raw else datetime.now(pytz.timezone("US/Eastern"))
+                # Extract expiration from OCC symbol (e.g. SPY260312C00671000 → 2026-03-12)
+                _sym = _row.get("symbol") or ""
+                _expiration = ""
+                for _i, _ch in enumerate(_sym):
+                    if _ch in ("C", "P") and _i >= 6:
+                        _d = _sym[_i - 6:_i]
+                        if _d.isdigit():
+                            _expiration = f"20{_d[:2]}-{_d[2:4]}-{_d[4:6]}"
+                        break
+                try:
+                    _entry_signals = _json.loads(_row.get("signals_json") or "{}")
+                except Exception:
+                    _entry_signals = {}
+                _pos = OpenPosition(
+                    trade_id=_row["trade_id"],
+                    symbol=_sym,
+                    direction=_row.get("direction") or "",
+                    strike=float(_row.get("strike") or 0),
+                    expiration=_expiration,
+                    entry_price=float(_row.get("entry_price") or 0),
+                    entry_time=_entry_time,
+                    total_qty=_total_qty,
+                    remaining_qty=int(_row.get("remaining_qty") or _total_qty),
+                    tranche_a_qty=_tranche_a_qty,
+                    tranche_b_qty=_total_qty - _tranche_a_qty,
+                    tranche_a_closed=bool(_row.get("tranche_a_closed")),
+                    high_water_mark=float(_row.get("high_water_mark") or 0),
+                    current_stop=float(_row.get("current_stop") or 0),
+                    entry_conviction=int(_row.get("conviction") or 0),
+                    entry_signals=_entry_signals,
+                )
+                pm.positions[_pos.trade_id] = _pos
+                logger.info("[Engine] Restored position %s (%s %s @ $%.2f)", _pos.trade_id[:8], _pos.direction, _pos.symbol, _pos.entry_price)
+            except Exception as _exc:
+                logger.error("[Engine] Failed to restore position %s: %s", _row.get("trade_id", "?"), _exc)
+        stale_ids = alpaca.reconcile_positions(pm.positions)
+        for _tid in stale_ids:
+            logger.warning("[Engine] Dropping stale position %s — not present in Alpaca", _tid[:8])
+            pm.positions.pop(_tid, None)
+            delete_position(_tid)
 
     # --- SIGINT / SIGTERM handler ---
     _signal.signal(_signal.SIGINT, _handle_sigint)
@@ -668,6 +717,10 @@ def main() -> None:
             logger.warning("[Engine] Control file error: %s", exc)
 
         try:
+            cfg = load_config()
+            if args.dry_run:
+                cfg.dry_run = True
+            pm.cfg = cfg
             _tick(scheduler, pm, cfg, alpaca)
         except Exception as e:
             logger.error("[Engine] Tick error: %s", e, exc_info=True)

@@ -72,3 +72,15 @@ All secrets via `.env` (gitignored):
 
 - **Schwab** (primary): `schwab-py` library, OAuth with 7-day token refresh logic
 - **TDA** (fallback): `tda-api` library, Selenium-automated login
+
+## gstack
+
+Use the `/browse` skill from gstack for all web browsing. Never use `mcp__claude-in-chrome__*` tools.
+
+Available gstack skills:
+- `/browse` — fast headless Chromium browsing (~100ms/command after first call)
+- `/plan-ceo-review` — CEO/founder-mode plan review
+- `/plan-eng-review` — Eng manager-mode plan review
+- `/review` — pre-landing PR review
+- `/ship` — merge, test, version bump, changelog, PR creation
+- `/retro` — weekly engineering retrospective

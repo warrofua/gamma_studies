@@ -36,6 +36,7 @@ class OpenPosition:
     entry_signals: Dict = field(default_factory=dict)
     gatekeeper_cleared: bool = False  # True once spot clears next gatekeeper
     nearest_gk_in_direction: Optional[float] = None  # the gatekeeper to watch for breakeven trigger
+    current_price: float = 0.0       # last known mark price (updated each tick)
 
 
 @dataclass

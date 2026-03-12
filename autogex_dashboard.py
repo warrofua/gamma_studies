@@ -282,18 +282,34 @@ def _render_positions() -> None:
         remaining_qty = pos.get("remaining_qty", "—")
         total_qty = pos.get("total_qty", "—")
 
+        current_price = pos.get("current_price") or 0.0
+        cfg_pos = load_config()
+        target_price = round(entry_price * (1 + cfg_pos.tranche_a_target_pct), 2) if entry_price else None
+        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price and current_price else None
+
         with st.container(border=True):
             st.markdown(
                 f"**{icon} {direction} {symbol} @ ${strike}**  "
                 f"&nbsp;&nbsp;`Qty: {remaining_qty}/{total_qty}`",
                 unsafe_allow_html=True,
             )
-            pc1, pc2, pc3 = st.columns(3)
+            pc1, pc2, pc3, pc4 = st.columns(4)
             with pc1:
                 st.metric("Entry $", f"${entry_price:.2f}")
             with pc2:
-                st.metric("Current $", "—")
+                if current_price:
+                    delta_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else None
+                    st.metric("Current $", f"${current_price:.2f}", delta=delta_str)
+                else:
+                    st.metric("Current $", "—")
             with pc3:
+                if target_price and not tranche_a_closed:
+                    st.metric("Target $", f"${target_price:.2f}")
+                elif tranche_a_closed:
+                    st.metric("Target $", "✅ Hit")
+                else:
+                    st.metric("Target $", "—")
+            with pc4:
                 st.metric("Stop $", f"${current_stop:.2f}" if current_stop else "—")
 
             ta_status = "✅ Sold" if tranche_a_closed else "⏳ Pending"
@@ -621,7 +637,15 @@ def _render_controls() -> None:
             )
             if st.button("Confirm: Close All", key="btn_close_all_confirm", type="primary"):
                 _write_control("close_all")
-                st.error("Close all positions command sent.")
+                with st.spinner("Closing positions..."):
+                    for _ in range(20):
+                        time.sleep(1)
+                        if not get_open_positions():
+                            break
+                if not get_open_positions():
+                    st.success("All positions closed.")
+                else:
+                    st.info("Close command sent. Positions may still be settling — check the positions panel.")
 
     # Sub-row 2: Config sliders
     with st.expander("⚙️ Configuration", expanded=False):

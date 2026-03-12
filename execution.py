@@ -10,10 +10,13 @@ Credentials are read from environment variables (already loaded via dotenv):
     ALPACA_PAPER   # "true" or "false", default "true"
 """
 
+import logging
 import os
 import re
 import time as _time
 import requests as _requests
+
+logger = logging.getLogger("autogex")
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
@@ -452,7 +455,32 @@ class AlpacaClient:
             return None
 
     def place_market_sell(self, symbol: str, qty: int) -> dict | None:
-        """Place a market sell order. Used for stops, partial exits, and hard close."""
+        """Place a market sell order. Used for stops, partial exits, and hard close.
+
+        Guards against overselling: checks current Alpaca position before submitting.
+        If we hold fewer contracts than qty (including 0), caps or skips the order to
+        avoid accidentally opening a short.
+        """
+        # --- Position guard: never sell more than we actually hold ---
+        try:
+            current_positions = {p['symbol']: p for p in self.get_open_positions()}
+            held = current_positions.get(symbol)
+            if held is None or held['qty'] <= 0:
+                logger.warning(
+                    "[Alpaca] Skipping market sell %s x%d — Alpaca shows no long position (qty=%s). "
+                    "Would have opened a short. Possible duplicate sell.",
+                    symbol, qty, held['qty'] if held else 0,
+                )
+                return None
+            if held['qty'] < qty:
+                logger.warning(
+                    "[Alpaca] Capping market sell %s from %d to %d contracts (only %d held in Alpaca).",
+                    symbol, qty, held['qty'], held['qty'],
+                )
+                qty = held['qty']
+        except Exception as e:
+            logger.warning("[Alpaca] Position check before sell failed for %s: %s — proceeding anyway", symbol, e)
+
         try:
             req = MarketOrderRequest(
                 symbol=symbol,
@@ -461,10 +489,10 @@ class AlpacaClient:
                 time_in_force=TimeInForce.DAY,
             )
             order = self._client.submit_order(req)
-            print(f"[Alpaca] Market sell: {symbol} x{qty} | id={order.id}")
+            logger.info("[Alpaca] Market sell submitted: %s x%d | id=%s", symbol, qty, order.id)
             return self._order_to_dict(order)
         except Exception as e:
-            print(f"[Alpaca] error in place_market_sell for {symbol}: {e}")
+            logger.error("[Alpaca] error in place_market_sell for %s: %s", symbol, e)
             return None
 
     def close_all_option_positions(self) -> list[dict]:
@@ -474,9 +502,17 @@ class AlpacaClient:
         Returns list of submitted order dicts.
         """
         positions = self.get_open_positions()
+        if not positions:
+            logger.info("[Alpaca] close_all_option_positions: no open positions found")
+            return []
+        logger.info("[Alpaca] close_all_option_positions: closing %d position(s)", len(positions))
         results = []
         for pos in positions:
-            order_dict = self.place_market_sell(pos['symbol'], int(pos['qty']))
+            qty = int(pos['qty'])
+            if qty <= 0:
+                logger.warning("[Alpaca] close_all skipping %s — qty=%d (not long)", pos['symbol'], qty)
+                continue
+            order_dict = self.place_market_sell(pos['symbol'], qty)
             if order_dict is not None:
                 results.append(order_dict)
         return results
@@ -484,27 +520,39 @@ class AlpacaClient:
     def reconcile_positions(self, pm_positions: dict) -> list[str]:
         """
         On engine startup: compare Alpaca open positions vs PositionManager state.
-        Returns list of warning strings for any discrepancies.
+        Returns list of trade_ids that are stale (in DB but not in Alpaca, or Alpaca
+        shows non-positive qty) so the caller can remove them from pm and the DB.
         Called once at startup.
         """
         alpaca_positions = {p['symbol']: p for p in self.get_open_positions()}
         pm_symbols = {pos.symbol for pos in pm_positions.values()}
 
-        warnings = []
         for sym in alpaca_positions:
             if sym not in pm_symbols:
-                msg = f"[Reconcile] Alpaca has position in {sym} not tracked by engine — manual review needed"
-                warnings.append(msg)
+                logger.warning(
+                    "[Reconcile] Alpaca has position in %s not tracked by engine — manual review needed", sym
+                )
 
-        for sym in pm_symbols:
-            if sym not in alpaca_positions:
-                msg = f"[Reconcile] Engine tracks {sym} but Alpaca shows no position — may be stale state"
-                warnings.append(msg)
+        stale_trade_ids = []
+        for trade_id, pos in pm_positions.items():
+            sym = pos.symbol
+            alpaca_pos = alpaca_positions.get(sym)
+            if alpaca_pos is None:
+                logger.warning(
+                    "[Reconcile] Engine tracks %s (trade %s) but Alpaca shows no position — "
+                    "removing stale state to prevent duplicate sells",
+                    sym, trade_id[:8],
+                )
+                stale_trade_ids.append(trade_id)
+            elif alpaca_pos['qty'] <= 0:
+                logger.warning(
+                    "[Reconcile] Engine tracks %s (trade %s) as LONG but Alpaca qty=%d — "
+                    "removing stale state to prevent duplicate sells",
+                    sym, trade_id[:8], alpaca_pos['qty'],
+                )
+                stale_trade_ids.append(trade_id)
 
-        for w in warnings:
-            print(w)
-
-        return warnings
+        return stale_trade_ids
 
     def get_option_mid_price(self, symbol: str) -> float | None:
         """Get mid price (bid+ask)/2 for an option. Returns None if unavailable."""

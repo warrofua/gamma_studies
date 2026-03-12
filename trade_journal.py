@@ -52,7 +52,8 @@ def init_db() -> None:
                 current_stop     REAL,
                 conviction       INTEGER,
                 signals_json     TEXT,
-                gex_entry_json   TEXT
+                gex_entry_json   TEXT,
+                current_price    REAL
             )
         """)
         conn.execute("""
@@ -86,6 +87,11 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_gex_snapshots_fetched_at ON gex_snapshots(fetched_at)"
         )
+        # Migration: add current_price column to existing DBs
+        try:
+            conn.execute("ALTER TABLE positions ADD COLUMN current_price REAL")
+        except Exception:
+            pass  # column already exists
         conn.commit()
 
 
