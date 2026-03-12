@@ -24,12 +24,11 @@ import argparse
 import csv
 import os
 import shutil
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 
-import psycopg2
-import psycopg2.extras
 import pytz
 
 from config import AutoGexConfig, load_config
@@ -37,6 +36,7 @@ from gamma_analysis import calculate_gamma_exposure, get_per_strike_details
 from gex_utils import SymbolGexData, process_symbol_gex
 from position_manager import OpenPosition, PositionAction, PositionManager
 from signal_engine import SignalResult, evaluate
+from trade_journal import load_spy_snapshots
 
 EASTERN = pytz.timezone("US/Eastern")
 
@@ -48,44 +48,23 @@ HARD_CLOSE_ET = time(15, 55)
 
 
 # ---------------------------------------------------------------------------
-# Database
+# Data loading (reads from autogex_state.db via trade_journal)
 # ---------------------------------------------------------------------------
 
 
-def _db_connect():
-    return psycopg2.connect(
-        host=os.environ.get("PGHOST", "localhost"),
-        port=int(os.environ.get("PGPORT", 5432)),
-        dbname=os.environ.get("PGDATABASE", "spx_options_data"),
-        user=os.environ.get("PGUSER", "postgres"),
-        password=os.environ.get("PGPASSWORD", "password"),
-    )
-
-
 def load_rows(start: date, end: date) -> List[Tuple[int, dict, datetime]]:
-    """Return all option-chain rows between start and end dates, ordered by fetched_at."""
-    conn = _db_connect()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, data, fetched_at
-                FROM spx_options_data
-                WHERE fetched_at >= %s AND fetched_at < %s + INTERVAL '1 day'
-                ORDER BY fetched_at ASC
-                """,
-                (start, end),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
+    """Return all SPY GEX snapshots between start and end dates, ordered by fetched_at.
 
+    Snapshots are written by the trading engine (trading_engine.py) each tick.
+    DB path is controlled by the AUTOGEX_DB_PATH env var (default: ~/autogex_state.db).
+    """
+    rows = load_spy_snapshots(start, end)
+    # Ensure all timestamps are timezone-aware (stored as ET ISO strings)
     result = []
-    for r in rows:
-        fa = r["fetched_at"]
+    for row_id, data, fa in rows:
         if fa.tzinfo is None:
-            fa = pytz.utc.localize(fa)
-        result.append((r["id"], r["data"], fa))
+            fa = EASTERN.localize(fa)
+        result.append((row_id, data, fa))
     return result
 
 
@@ -688,11 +667,13 @@ def main() -> None:
     else:
         cfg = load_config()
 
-    print(f"[Backtest] Loading rows from {args.start} to {args.end} ...")
+    db_path = os.environ.get("AUTOGEX_DB_PATH", str(Path.home() / "autogex_state.db"))
+    print(f"[Backtest] Loading SPY snapshots from {args.start} to {args.end} ...")
+    print(f"[Backtest] Source: {db_path}")
     try:
         rows = load_rows(args.start, args.end)
     except Exception as exc:
-        print(f"[ERROR] Database connection failed: {exc}")
+        print(f"[ERROR] Failed to read snapshot database: {exc}")
         sys.exit(1)
 
     if not rows:

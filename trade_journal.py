@@ -1,8 +1,9 @@
 import sqlite3
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import List, Tuple
 
 DB_PATH = os.environ.get("AUTOGEX_DB_PATH", str(Path.home() / "autogex_state.db"))
 
@@ -75,6 +76,16 @@ def init_db() -> None:
                 largest_loss  REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gex_snapshots (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                fetched_at TEXT NOT NULL,
+                data_json  TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gex_snapshots_fetched_at ON gex_snapshots(fetched_at)"
+        )
         conn.commit()
 
 
@@ -284,3 +295,41 @@ def compute_daily_summary(date_str: str) -> dict:
         # Upsert into database
         upsert_daily_summary(summary)
         return summary
+
+
+# ---------------------------------------------------------------------------
+# SPY GEX snapshot store (for backtesting)
+# ---------------------------------------------------------------------------
+
+def store_spy_snapshot(data_json: dict, fetched_at: datetime) -> None:
+    """Persist a raw SPY option chain JSON snapshot for later backtesting."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO gex_snapshots (fetched_at, data_json) VALUES (?, ?)",
+            (fetched_at.isoformat(), json.dumps(data_json)),
+        )
+        conn.commit()
+
+
+def load_spy_snapshots(start: date, end: date) -> List[Tuple[int, dict, datetime]]:
+    """Return SPY snapshots with fetched_at between start and end (inclusive), oldest first."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            SELECT id, data_json, fetched_at FROM gex_snapshots
+            WHERE fetched_at >= ? AND fetched_at < date(?, '+1 day')
+            ORDER BY fetched_at ASC
+            """,
+            (start.isoformat(), end.isoformat()),
+        )
+        rows = cursor.fetchall()
+
+    result = []
+    for row_id, data_str, fa_str in rows:
+        try:
+            data = json.loads(data_str)
+            fa = datetime.fromisoformat(fa_str)
+            result.append((row_id, data, fa))
+        except Exception:
+            pass
+    return result

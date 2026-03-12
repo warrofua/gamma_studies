@@ -33,6 +33,7 @@ from trade_journal import (
     init_db,
     insert_trade,
     set_engine_state,
+    store_spy_snapshot,
     update_trade_exit,
     upsert_position,
 )
@@ -456,6 +457,12 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: A
             return
 
     _previous_gex = dict(result[2])  # update previous for delta tracking
+
+    # Store raw snapshot for backtesting (best-effort; never block the tick)
+    try:
+        store_spy_snapshot(result[0], now_et)
+    except Exception as exc:
+        logger.debug("[Engine] Snapshot store failed: %s", exc)
 
     data = process_symbol_gex(result, strike_range=800, gex_min_threshold=0.0)
     if data is None:
