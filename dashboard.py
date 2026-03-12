@@ -859,52 +859,67 @@ with st.sidebar:
 
 st.caption(f"Using {broker_name} API")
 
-# --- AutoGEX Trading: side-by-side combined layout ---
+# --- AutoGEX Trading: sub-nav (Live | Reports) ---
 if view_mode == "AutoGEX Trading":
-    from autogex_dashboard import render_autogex_panel
+    from autogex_dashboard import render_autogex_panel, _render_reports_tab
 
-    if "previous_gex" not in st.session_state:
-        st.session_state.previous_gex = {}
-    if "previous_gamma_velocity" not in st.session_state:
-        st.session_state.previous_gamma_velocity = {}
-    if "previous_gamma_velocity_timestamp" not in st.session_state:
-        st.session_state.previous_gamma_velocity_timestamp = {}
+    autogex_sub = st.radio(
+        "",
+        ["🔴 Live", "📊 Reports"],
+        horizontal=True,
+        key="autogex_sub",
+        label_visibility="collapsed",
+    )
 
-    # Fetch SPY data for the companion heatmap
-    spy_data = None
-    eastern = pytz.timezone("US/Eastern")
-    prev = st.session_state.previous_gex.get("SPY", {})
-    result, spy_err = fetch_options_and_gex(client, "SPY", strike_count, prev, client_module)
-    if result is not None:
-        st.session_state.previous_gex["SPY"] = dict(result[2])
-        prev_vel = st.session_state.previous_gamma_velocity.get("SPY")
-        prev_ts = st.session_state.previous_gamma_velocity_timestamp.get("SPY")
-        st.session_state.previous_gamma_velocity["SPY"] = result[6]
-        st.session_state.previous_gamma_velocity_timestamp["SPY"] = datetime.now(eastern)
-        processed = process_symbol_gex(result, strike_range, gex_min_threshold)
-        if processed is not None:
-            processed.symbol = "SPY"
-            processed.label = "SPY"
-            processed.prev_gamma_velocity = prev_vel
-            processed.prev_fetch_timestamp = prev_ts
-            spy_data = processed
+    if autogex_sub == "🔴 Live":
+        if "previous_gex" not in st.session_state:
+            st.session_state.previous_gex = {}
+        if "previous_gamma_velocity" not in st.session_state:
+            st.session_state.previous_gamma_velocity = {}
+        if "previous_gamma_velocity_timestamp" not in st.session_state:
+            st.session_state.previous_gamma_velocity_timestamp = {}
 
-    autogex_col, gex_col = st.columns([3, 2])
-    with autogex_col:
-        render_autogex_panel()
-    with gex_col:
-        st.markdown("### SPY GEX")
-        if spy_data is not None:
-            _render_symbol_column(spy_data, show_extended_metrics=False)
-        elif spy_err:
-            st.warning(f"SPY fetch error: {spy_err}")
-        else:
-            st.info("No SPY data available.")
+        # Fetch SPY data for the companion heatmap
+        spy_data = None
+        eastern = pytz.timezone("US/Eastern")
+        prev = st.session_state.previous_gex.get("SPY", {})
+        result, spy_err = fetch_options_and_gex(client, "SPY", strike_count, prev, client_module)
+        if result is not None:
+            st.session_state.previous_gex["SPY"] = dict(result[2])
+            prev_vel = st.session_state.previous_gamma_velocity.get("SPY")
+            prev_ts = st.session_state.previous_gamma_velocity_timestamp.get("SPY")
+            st.session_state.previous_gamma_velocity["SPY"] = result[6]
+            st.session_state.previous_gamma_velocity_timestamp["SPY"] = datetime.now(eastern)
+            processed = process_symbol_gex(result, strike_range, gex_min_threshold)
+            if processed is not None:
+                processed.symbol = "SPY"
+                processed.label = "SPY"
+                processed.prev_gamma_velocity = prev_vel
+                processed.prev_fetch_timestamp = prev_ts
+                spy_data = processed
 
-    last_update = datetime.now(eastern).strftime("%b %d, %Y %H:%M:%S ET")
-    st.caption(f"Data as of {last_update} · Auto-refreshing every 5 seconds.")
-    time.sleep(5)
-    st.rerun()
+        autogex_col, gex_col = st.columns([3, 2])
+        with autogex_col:
+            render_autogex_panel()
+        with gex_col:
+            st.markdown("### SPY GEX")
+            if spy_data is not None:
+                _render_symbol_column(spy_data, show_extended_metrics=False)
+            elif spy_err:
+                st.warning(f"SPY fetch error: {spy_err}")
+            else:
+                st.info("No SPY data available.")
+
+        last_update = datetime.now(eastern).strftime("%b %d, %Y %H:%M:%S ET")
+        st.caption(f"Data as of {last_update} · Auto-refreshing every 5 seconds.")
+        time.sleep(5)
+        st.rerun()
+
+    else:  # 📊 Reports
+        _render_reports_tab()
+
+if view_mode == "AutoGEX Trading":
+    st.stop()
 
 # --- Display mode (main pane top) ---
 display_mode = st.radio(
