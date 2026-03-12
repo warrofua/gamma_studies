@@ -94,11 +94,15 @@ def init_db() -> None:
             pass  # column already exists
 
         # Migration: add capital risk and tranche linkage columns to trades
+        _ALLOWED_MIGRATION_COLS = {"capital_risked", "initial_stop_price", "parent_trade_id"}
+        _ALLOWED_MIGRATION_TYPES = {"REAL", "TEXT"}
         for _col, _coltype in [
             ("capital_risked", "REAL"),
             ("initial_stop_price", "REAL"),
             ("parent_trade_id", "TEXT"),
         ]:
+            assert _col in _ALLOWED_MIGRATION_COLS, f"Unexpected migration column: {_col}"
+            assert _coltype in _ALLOWED_MIGRATION_TYPES, f"Unexpected migration type: {_coltype}"
             try:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {_col} {_coltype}")
             except Exception:
