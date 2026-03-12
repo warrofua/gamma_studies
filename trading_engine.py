@@ -43,6 +43,7 @@ from trade_journal import (
 # ---------------------------------------------------------------------------
 
 _LOG_PATH = Path(__file__).resolve().parent / "autogex.log"
+_CONTROL_FILE = Path(__file__).resolve().parent / "autogex_control.txt"
 
 def _setup_logging() -> logging.Logger:
     """Configure rotating file + console logger."""
@@ -392,6 +393,34 @@ def _execute_partial_close(
     upsert_position(_position_to_dict(pos))
 
 
+def _flush_positions_to_journal(pm: PositionManager, reason: str) -> None:
+    """Write exit records for all open positions and remove them from the journal.
+
+    Used on shutdown and close-all commands so the DB reflects reality regardless
+    of whether orders were actually placed (dry-run handles this at the log level).
+    """
+    now_et = datetime.now(_ET)
+    for trade_id in list(pm.positions.keys()):
+        pos = pm.positions.get(trade_id)
+        if pos is None:
+            continue
+        hold_seconds = int((now_et - pos.entry_time).total_seconds())
+        realized_pnl = 0.0  # no fill price available at forced close
+        update_trade_exit(
+            pos.trade_id,
+            now_et.isoformat(),
+            pos.entry_price,  # best available; no fill price at forced close
+            pos.remaining_qty,
+            reason,
+            realized_pnl,
+            "unknown",
+            {},
+            hold_seconds,
+        )
+        delete_position(pos.trade_id)
+    pm.positions.clear()
+
+
 # ---------------------------------------------------------------------------
 # Core tick
 # ---------------------------------------------------------------------------
@@ -608,14 +637,36 @@ def main() -> None:
         logger.info("[Engine] Found %d open position(s) in journal from previous session", len(db_positions))
         alpaca.reconcile_positions(pm.positions)
 
-    # --- SIGINT handler ---
+    # --- SIGINT / SIGTERM handler ---
     _signal.signal(_signal.SIGINT, _handle_sigint)
+    _signal.signal(_signal.SIGTERM, _handle_sigint)
 
     # --- Enter main loop ---
     set_engine_state("status", "running")
     logger.info("[Engine] Running. Press Ctrl+C to stop.")
 
     while not _shutdown_requested:
+        # --- Poll control file ---
+        try:
+            if _CONTROL_FILE.exists():
+                cmd = _CONTROL_FILE.read_text().strip().lower()
+                _CONTROL_FILE.unlink(missing_ok=True)
+                if cmd == "close_all":
+                    logger.info("[Engine] close_all command received.")
+                    if not cfg.dry_run and pm.positions:
+                        try:
+                            alpaca.close_all_option_positions()
+                            logger.info("[Engine] Close-all orders submitted.")
+                        except Exception as exc:
+                            logger.error("[Engine] Close-all order failed: %s", exc)
+                    _flush_positions_to_journal(pm, "close_all_command")
+                    logger.info("[Engine] All positions flushed to journal.")
+                elif cmd == "stop":
+                    logger.info("[Engine] stop command received via control file.")
+                    _shutdown_requested = True
+        except Exception as exc:
+            logger.warning("[Engine] Control file error: %s", exc)
+
         try:
             _tick(scheduler, pm, cfg, alpaca)
         except Exception as e:
@@ -640,6 +691,7 @@ def main() -> None:
                 logger.info("[Engine] Close-all orders submitted.")
             except Exception as exc:
                 logger.error("[Engine] Failed to close positions during shutdown: %s", exc)
+        _flush_positions_to_journal(pm, "engine_shutdown")
 
     set_engine_state("status", "stopped")
     compute_daily_summary(date.today().isoformat())

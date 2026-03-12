@@ -5,6 +5,9 @@ autogex_config.json.  Does NOT import or run the trading engine.
 """
 
 import os
+import signal
+import subprocess
+import sys
 import time
 import sqlite3
 import json
@@ -55,10 +58,50 @@ REGIME_COLORS = {
 }
 
 CONTROL_FILE = Path(__file__).resolve().parent / "autogex_control.txt"
+PID_FILE = Path(__file__).resolve().parent / "autogex_engine.pid"
+_ENGINE_SCRIPT = Path(__file__).resolve().parent / "trading_engine.py"
 
 
 def _write_control(command: str) -> None:
     CONTROL_FILE.write_text(command)
+
+
+def _engine_pid() -> int | None:
+    """Return the engine PID if it's recorded and the process is alive, else None."""
+    if not PID_FILE.exists():
+        return None
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        os.kill(pid, 0)  # raises if process is gone
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        PID_FILE.unlink(missing_ok=True)
+        return None
+
+
+def _start_engine() -> None:
+    if _engine_pid() is not None:
+        st.warning("Engine is already running.")
+        return
+    proc = subprocess.Popen(
+        [sys.executable, str(_ENGINE_SCRIPT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid))
+
+
+def _stop_engine() -> None:
+    pid = _engine_pid()
+    if pid is None:
+        st.warning("No running engine found.")
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    PID_FILE.unlink(missing_ok=True)
 
 
 def _et_now() -> datetime:
@@ -562,13 +605,13 @@ def _render_controls() -> None:
     with ctrl_left:
         if status != "running":
             if st.button("▶ Start Engine", type="primary", key="btn_start"):
-                _write_control("start")
-                st.success("Start command sent.")
+                _start_engine()
+                st.success("Engine started.")
         else:
             if st.button("⏹ Stop Engine", type="secondary", key="btn_stop"):
-                _write_control("stop")
-                st.success("Stop command sent.")
-        st.caption("Start/stop takes effect on the engine's next poll cycle (~7s)")
+                _stop_engine()
+                st.success("Stop signal sent — engine will shut down after closing positions.")
+        st.caption("Status updates within ~7s after start/stop.")
 
     with ctrl_right:
         if st.button("🚨 Close All Positions", key="btn_close_all"):
