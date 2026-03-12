@@ -104,6 +104,7 @@ def _execute_entry(
     cfg,
     scheduler: GammaExposureScheduler,
     dry_run: bool = True,
+    alpaca: AlpacaClient = None,
 ) -> None:
     """Open a new position: select strike, build symbol, log to journal."""
 
@@ -128,12 +129,8 @@ def _execute_entry(
     # --- Expiration ---
     expiration = data.exp_date.strftime("%Y-%m-%d")
 
-    # --- Option price ---
-    if dry_run:
-        option_price = 1.50
-    else:
-        # Phase 3: query Alpaca for real price
-        option_price = 1.50  # placeholder until live order placement
+    # --- Option price (dry-run placeholder) ---
+    option_price = 1.50
 
     # --- Nearest gatekeeper ---
     if signal.direction == "CALL":
@@ -141,7 +138,7 @@ def _execute_entry(
     else:
         nearest_gk = data.nearest_gk_below
 
-    # --- Build OCC-style symbol (dry-run placeholder) ---
+    # --- Build OCC-style symbol ---
     exp_compact = data.exp_date.strftime("%y%m%d")
     cp = "C" if signal.direction == "CALL" else "P"
     strike_int = int(strike * 1000)
@@ -150,7 +147,35 @@ def _execute_entry(
     # --- Open position in PositionManager ---
     pos = pm.open_position(signal, symbol, strike, expiration, option_price, nearest_gk)
 
-    # --- Log entry to journal ---
+    if dry_run:
+        print(f"[DRY-RUN] ENTER {signal.direction} {pos.total_qty}x {symbol} @ ${option_price:.2f} "
+              f"| conviction={pos.entry_conviction} | stop=${pos.current_stop:.2f}")
+    else:
+        # Get real mid price from Alpaca
+        mid = alpaca.get_option_mid_price(symbol)
+        if mid is None:
+            print(f"[Engine] Could not get quote for {symbol}, skipping entry")
+            # Undo the position that was opened
+            pm.positions.pop(pos.trade_id, None)
+            pm.trades_today -= 1
+            return
+        option_price = mid
+        limit_price = round(mid - 0.01, 2)  # penny inside mid
+        order = alpaca.place_limit_buy(symbol, pos.total_qty, limit_price)
+        if order is None:
+            print(f"[Engine] Order failed for {symbol}, skipping entry")
+            pm.positions.pop(pos.trade_id, None)
+            pm.trades_today -= 1
+            return
+        # Update entry price with actual fill
+        filled_price = order.get('filled_avg_price') or option_price
+        pos.entry_price = filled_price
+        pos.current_stop = round(filled_price * (1 - cfg.initial_stop_pct), 2)
+        pos.high_water_mark = filled_price
+        print(f"[LIVE] ENTER {signal.direction} {pos.total_qty}x {symbol} @ ${filled_price:.2f} "
+              f"| conviction={pos.entry_conviction} | stop=${pos.current_stop:.2f}")
+
+    # --- Log entry to journal (uses pos.entry_price which is set correctly in both paths) ---
     insert_trade({
         "trade_id": pos.trade_id,
         "date": date.today().isoformat(),
@@ -177,12 +202,6 @@ def _execute_entry(
     })
     upsert_position(_position_to_dict(pos))
 
-    tag = "DRY-RUN" if dry_run else "LIVE"
-    print(
-        f"[{tag}] ENTER {signal.direction} {pos.total_qty}x {symbol} @ ${option_price:.2f} "
-        f"| conviction={pos.entry_conviction} | stop=${pos.current_stop:.2f}"
-    )
-
 
 def _execute_close(
     pos: OpenPosition,
@@ -190,15 +209,30 @@ def _execute_close(
     exit_price: float,
     data: SymbolGexData,
     pm: PositionManager,
-    cfg,
     dry_run: bool = True,
+    alpaca: AlpacaClient = None,
 ) -> None:
     """Close a position fully, update journal, remove from PositionManager."""
-    realized_pnl = (exit_price - pos.entry_price) * pos.remaining_qty * 100
+    if dry_run:
+        realized_pnl = (exit_price - pos.entry_price) * pos.remaining_qty * 100
+        print(
+            f"[DRY-RUN] CLOSE {pos.direction} {pos.remaining_qty}x {pos.symbol} "
+            f"@ ${exit_price:.2f} | P&L=${realized_pnl:.2f} | reason={action.reason}"
+        )
+    else:
+        order = alpaca.place_market_sell(pos.symbol, pos.remaining_qty)
+        filled_price = exit_price  # fallback
+        if order and order.get('filled_avg_price'):
+            filled_price = order['filled_avg_price']
+        exit_price = filled_price
+        realized_pnl = (exit_price - pos.entry_price) * pos.remaining_qty * 100
+        print(
+            f"[LIVE] CLOSE {pos.direction} {pos.remaining_qty}x {pos.symbol} "
+            f"@ ${exit_price:.2f} | P&L=${realized_pnl:.2f} | reason={action.reason}"
+        )
+
     now_et = datetime.now(_ET)
     hold_seconds = int((now_et - pos.entry_time).total_seconds())
-    current_regime = data.gamma_flip_strike  # use regime from signal if available
-    # Build a proper regime string from the data
     from signal_engine import classify_regime
     current_regime_str = classify_regime(data)
 
@@ -217,12 +251,6 @@ def _execute_close(
     pm.close_position(pos.trade_id, realized_pnl, action.reason)
     delete_position(pos.trade_id)
 
-    tag = "DRY-RUN" if dry_run else "LIVE"
-    print(
-        f"[{tag}] CLOSE {pos.direction} {pos.remaining_qty}x {pos.symbol} "
-        f"@ ${exit_price:.2f} | P&L=${realized_pnl:.2f} | reason={action.reason}"
-    )
-
 
 def _execute_partial_close(
     pos: OpenPosition,
@@ -230,13 +258,28 @@ def _execute_partial_close(
     exit_price: float,
     data: SymbolGexData,
     pm: PositionManager,
-    cfg,
     dry_run: bool = True,
+    alpaca: AlpacaClient = None,
 ) -> None:
     """Sell Tranche A partial, update in-memory state and journal."""
     import uuid as _uuid
 
-    partial_pnl = (exit_price - pos.entry_price) * action.qty * 100
+    if dry_run:
+        partial_pnl = (exit_price - pos.entry_price) * action.qty * 100
+        print(
+            f"[DRY-RUN] PARTIAL SELL Tranche A: {action.qty}x {pos.symbol} "
+            f"@ ${exit_price:.2f} | partial P&L=${partial_pnl:.2f}"
+        )
+    else:
+        order = alpaca.place_market_sell(pos.symbol, action.qty)
+        if order and order.get('filled_avg_price'):
+            exit_price = order['filled_avg_price']
+        partial_pnl = (exit_price - pos.entry_price) * action.qty * 100
+        print(
+            f"[LIVE] PARTIAL SELL Tranche A: {action.qty}x {pos.symbol} "
+            f"@ ${exit_price:.2f} | partial P&L=${partial_pnl:.2f}"
+        )
+
     pm.daily_realized_pnl += partial_pnl
     pos.remaining_qty -= action.qty
 
@@ -268,18 +311,12 @@ def _execute_partial_close(
 
     upsert_position(_position_to_dict(pos))
 
-    tag = "DRY-RUN" if dry_run else "LIVE"
-    print(
-        f"[{tag}] PARTIAL SELL Tranche A: {action.qty}x {pos.symbol} "
-        f"@ ${exit_price:.2f} | partial P&L=${partial_pnl:.2f}"
-    )
-
 
 # ---------------------------------------------------------------------------
 # Core tick
 # ---------------------------------------------------------------------------
 
-def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg) -> None:
+def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: AlpacaClient) -> None:
     """Single engine tick: fetch GEX, evaluate signal, manage positions, maybe enter."""
     global _previous_gex, _current_date
 
@@ -356,10 +393,10 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg) -> None:
             else:
                 current_price = pos.entry_price * 0.98
         else:
-            from execution import AlpacaClient as _AlpacaClient  # already imported
-            # alpaca is available via closure — not passed here; use module-level if needed
-            # For now a stub; live order execution is Phase 3
-            current_price = pos.entry_price
+            quote = alpaca.get_latest_option_quote(pos.symbol)
+            if quote is None:
+                continue  # skip this tick if no quote
+            current_price = quote['mid']
 
         actions = pm.evaluate_position(pos, current_price, data.spot_price)
 
@@ -371,11 +408,23 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg) -> None:
                 )
 
             if action.action in ("stop_out", "hard_close"):
-                _execute_close(pos, action, current_price, data, pm, cfg, dry_run=cfg.dry_run)
+                _execute_close(pos, action, current_price, data, pm, dry_run=cfg.dry_run, alpaca=alpaca)
+                if pm.circuit_breaker_active and not cfg.dry_run:
+                    print("[Engine] Circuit breaker active — closing all remaining positions")
+                    alpaca.close_all_option_positions()
+                    # Clear pm positions (they're being closed at market)
+                    pm.positions.clear()
+                    break  # exit position loop
                 break  # position is now closed; skip remaining actions for it
 
             elif action.action == "sell_tranche_a":
-                _execute_partial_close(pos, action, current_price, data, pm, cfg, dry_run=cfg.dry_run)
+                _execute_partial_close(pos, action, current_price, data, pm, dry_run=cfg.dry_run, alpaca=alpaca)
+                if pm.circuit_breaker_active and not cfg.dry_run:
+                    print("[Engine] Circuit breaker active — closing all remaining positions")
+                    alpaca.close_all_option_positions()
+                    # Clear pm positions (they're being closed at market)
+                    pm.positions.clear()
+                    break  # exit position loop
 
             elif action.action == "update_stop":
                 pos.current_stop = action.new_stop
@@ -388,7 +437,7 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg) -> None:
             print(f"[Engine] Cannot enter: {reason}")
         else:
             try:
-                _execute_entry(signal, data, pm, cfg, scheduler, dry_run=cfg.dry_run)
+                _execute_entry(signal, data, pm, cfg, scheduler, dry_run=cfg.dry_run, alpaca=alpaca)
             except RuntimeError as e:
                 print(f"[Engine] Entry blocked: {e}")
 
@@ -442,6 +491,15 @@ def main() -> None:
     # --- Position manager ---
     pm = PositionManager(cfg)
 
+    # On restart, reconcile Alpaca positions with engine state
+    # (load any persisted open positions from SQLite first)
+    from trade_journal import get_open_positions as _get_db_positions
+    db_positions = _get_db_positions()
+    if db_positions:
+        print(f"[Engine] Found {len(db_positions)} open position(s) in journal from previous session")
+        # Reconcile with Alpaca (warn only — don't auto-restore complex state)
+        alpaca.reconcile_positions(pm.positions)
+
     # --- SIGINT handler ---
     _signal.signal(_signal.SIGINT, _handle_sigint)
 
@@ -451,7 +509,7 @@ def main() -> None:
 
     while not _shutdown_requested:
         try:
-            _tick(scheduler, pm, cfg)
+            _tick(scheduler, pm, cfg, alpaca)
         except Exception as e:
             print(f"[Engine] Tick error: {e}")
         time.sleep(cfg.poll_interval_seconds)
@@ -469,7 +527,7 @@ def main() -> None:
         else:
             print(
                 f"[Engine] WARNING: {open_count} open position(s) at shutdown. "
-                f"Live close logic is Phase 3."
+                f"Consider closing manually."
             )
 
     set_engine_state("status", "stopped")

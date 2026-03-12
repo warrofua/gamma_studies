@@ -1,8 +1,8 @@
 """
-execution.py — Alpaca API connectivity layer (Phase 1: read-only)
+execution.py — Alpaca API connectivity layer (Phase 1: read-only + Phase 3: order placement)
 
 Provides AlpacaClient for account info, positions, option contracts,
-quotes, and order queries. No order placement (Phase 3).
+quotes, order queries, and order placement.
 
 Credentials are read from environment variables (already loaded via dotenv):
     ALPACA_API_KEY
@@ -12,11 +12,17 @@ Credentials are read from environment variables (already loaded via dotenv):
 
 import os
 import re
+import time as _time
 import requests as _requests
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOptionContractsRequest, GetOrdersRequest
-from alpaca.trading.enums import ContractType, QueryOrderStatus
+from alpaca.trading.requests import (
+    GetOptionContractsRequest,
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+)
+from alpaca.trading.enums import ContractType, QueryOrderStatus, OrderSide, TimeInForce, OrderType
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import OptionLatestQuoteRequest
 
@@ -39,7 +45,7 @@ def _looks_like_option(symbol: str) -> bool:
 
 
 class AlpacaClient:
-    """Read-only Alpaca API client for Phase 1 connectivity and data retrieval."""
+    """Alpaca API client for connectivity, data retrieval, and order placement."""
 
     def __init__(self):
         api_key = os.environ.get("ALPACA_API_KEY", "")
@@ -59,6 +65,9 @@ class AlpacaClient:
             secret_key=secret_key,
             paper=paper,
         )
+
+        # Alias used by order placement methods
+        self._client = self._trading
 
         # Option market data client (does not require paper flag)
         self._option_data = OptionHistoricalDataClient(
@@ -330,3 +339,174 @@ class AlpacaClient:
         except Exception as e:
             print(f"[Alpaca] error in get_orders: {e}")
             return []
+
+    # ------------------------------------------------------------------
+    # Order placement (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _order_to_dict(self, order) -> dict:
+        """Convert an Alpaca order object to a plain dict."""
+        return {
+            'id': str(getattr(order, 'id', None)),
+            'symbol': getattr(order, 'symbol', None),
+            'qty': int(getattr(order, 'qty', None)) if getattr(order, 'qty', None) else 0,
+            'filled_qty': int(getattr(order, 'filled_qty', None)) if getattr(order, 'filled_qty', None) else 0,
+            'status': str(getattr(order, 'status', None)),
+            'order_type': str(getattr(order, 'order_type', None)),
+            'limit_price': float(getattr(order, 'limit_price', None)) if getattr(order, 'limit_price', None) else None,
+            'filled_avg_price': float(getattr(order, 'filled_avg_price', None)) if getattr(order, 'filled_avg_price', None) else None,
+        }
+
+    def _poll_for_fill(self, order_id, timeout_secs: int = 10, poll_interval: int = 2) -> object | None:
+        """
+        Poll an order by ID until filled or timeout. Returns final order object.
+        Returns None if the order is not filled within timeout_secs.
+        """
+        elapsed = 0
+        order = None
+        while elapsed < timeout_secs:
+            _time.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                order = self._client.get_order_by_id(order_id)
+                status = str(getattr(order, 'status', '')).lower()
+                if 'filled' in status:
+                    return order
+            except Exception as e:
+                print(f"[Alpaca] error polling order {order_id}: {e}")
+        return None  # not filled within timeout
+
+    def place_limit_buy(self, symbol: str, qty: int, limit_price: float) -> dict | None:
+        """
+        Place a limit buy. Returns order dict on success, None on failure.
+        Retries once at ask price if not filled within 10s, then falls back to market.
+
+        Returns dict with keys: id, symbol, qty, filled_qty, status, limit_price, filled_avg_price
+        """
+        # --- Attempt 1: initial limit order ---
+        try:
+            req = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Limit buy attempt 1: {symbol} x{qty} @ {limit_price:.2f} | id={order.id}")
+        except Exception as e:
+            print(f"[Alpaca] error submitting limit buy (attempt 1) for {symbol}: {e}")
+            return None
+
+        filled_order = self._poll_for_fill(order.id, timeout_secs=10, poll_interval=2)
+        if filled_order is not None:
+            return self._order_to_dict(filled_order)
+
+        # Not filled — cancel and retry at a penny improvement
+        try:
+            self._client.cancel_order_by_id(order.id)
+            print(f"[Alpaca] Limit buy attempt 1 not filled; cancelled. Repricing.")
+        except Exception as e:
+            print(f"[Alpaca] error cancelling order {order.id}: {e}")
+
+        # --- Attempt 2: repriced limit order ---
+        retry_price = round(limit_price + 0.02, 2)
+        try:
+            req = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=retry_price,
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Limit buy attempt 2: {symbol} x{qty} @ {retry_price:.2f} | id={order.id}")
+        except Exception as e:
+            print(f"[Alpaca] error submitting limit buy (attempt 2) for {symbol}: {e}")
+            return None
+
+        filled_order = self._poll_for_fill(order.id, timeout_secs=10, poll_interval=2)
+        if filled_order is not None:
+            return self._order_to_dict(filled_order)
+
+        # Still not filled — cancel and fall back to market
+        try:
+            self._client.cancel_order_by_id(order.id)
+            print(f"[Alpaca] Limit buy attempt 2 not filled; falling back to market order.")
+        except Exception as e:
+            print(f"[Alpaca] error cancelling order {order.id}: {e}")
+
+        # --- Attempt 3: market order fallback ---
+        try:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Market buy fallback: {symbol} x{qty} | id={order.id}")
+            return self._order_to_dict(order)
+        except Exception as e:
+            print(f"[Alpaca] error submitting market buy fallback for {symbol}: {e}")
+            return None
+
+    def place_market_sell(self, symbol: str, qty: int) -> dict | None:
+        """Place a market sell order. Used for stops, partial exits, and hard close."""
+        try:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Market sell: {symbol} x{qty} | id={order.id}")
+            return self._order_to_dict(order)
+        except Exception as e:
+            print(f"[Alpaca] error in place_market_sell for {symbol}: {e}")
+            return None
+
+    def close_all_option_positions(self) -> list[dict]:
+        """
+        Market-sell all open option positions.
+        Used for hard close (3:55 PM) and circuit breaker.
+        Returns list of submitted order dicts.
+        """
+        positions = self.get_open_positions()
+        results = []
+        for pos in positions:
+            order_dict = self.place_market_sell(pos['symbol'], int(pos['qty']))
+            if order_dict is not None:
+                results.append(order_dict)
+        return results
+
+    def reconcile_positions(self, pm_positions: dict) -> list[str]:
+        """
+        On engine startup: compare Alpaca open positions vs PositionManager state.
+        Returns list of warning strings for any discrepancies.
+        Called once at startup.
+        """
+        alpaca_positions = {p['symbol']: p for p in self.get_open_positions()}
+        pm_symbols = {pos.symbol for pos in pm_positions.values()}
+
+        warnings = []
+        for sym in alpaca_positions:
+            if sym not in pm_symbols:
+                msg = f"[Reconcile] Alpaca has position in {sym} not tracked by engine — manual review needed"
+                warnings.append(msg)
+
+        for sym in pm_symbols:
+            if sym not in alpaca_positions:
+                msg = f"[Reconcile] Engine tracks {sym} but Alpaca shows no position — may be stale state"
+                warnings.append(msg)
+
+        for w in warnings:
+            print(w)
+
+        return warnings
+
+    def get_option_mid_price(self, symbol: str) -> float | None:
+        """Get mid price (bid+ask)/2 for an option. Returns None if unavailable."""
+        quote = self.get_latest_option_quote(symbol)
+        return quote['mid'] if quote else None
