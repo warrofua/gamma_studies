@@ -642,7 +642,7 @@ def main() -> None:
         for _row in db_positions:
             try:
                 _total_qty = int(_row.get("total_qty") or 0)
-                _tranche_a_qty = _total_qty // 2
+                _tranche_a_qty = min(_total_qty - 1, round(_total_qty * cfg.tranche_a_pct)) if _total_qty >= 2 else _total_qty // 2
                 _entry_time_raw = _row.get("entry_time") or ""
                 _entry_time = datetime.fromisoformat(_entry_time_raw) if _entry_time_raw else datetime.now(pytz.timezone("US/Eastern"))
                 # Extract expiration from OCC symbol (e.g. SPY260312C00671000 → 2026-03-12)

@@ -76,6 +76,9 @@ class PositionManager:
         if self.trades_today >= self.cfg.max_trades_per_day:
             return (False, "Max trades reached")
 
+        if len(self.positions) >= self.cfg.max_concurrent_positions:
+            return (False, f"Max concurrent positions ({self.cfg.max_concurrent_positions}) reached")
+
         cutoff_h, cutoff_m = map(int, self.cfg.no_new_entries_after.split(":"))
         cutoff = time(cutoff_h, cutoff_m)
         if self._time_et() >= cutoff:
@@ -124,7 +127,7 @@ class PositionManager:
         qty = self.compute_block_size(effective_conv, entry_price)
 
         trade_id = str(uuid.uuid4())
-        tranche_a_qty = qty // 2
+        tranche_a_qty = min(qty - 1, round(qty * self.cfg.tranche_a_pct))
         tranche_b_qty = qty - tranche_a_qty
 
         position = OpenPosition(

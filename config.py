@@ -23,12 +23,13 @@ class AutoGexConfig:
     # Stop loss
     initial_stop_pct: float = 0.50       # 50% below entry price
     breakeven_buffer: float = 0.05       # $0.05 above entry when breakeven triggered
-    trail_pct_am: float = 0.25           # trailing stop % before 1:30 PM ET
+    trail_pct_am: float = 0.30           # trailing stop % before 1:30 PM ET
     trail_pct_afternoon: float = 0.15    # trailing stop % after 1:30 PM ET
     trail_pct_final: float = 0.10        # trailing stop % after 3:00 PM ET
 
     # Partial exits
     tranche_a_target_pct: float = 0.30   # sell Tranche A at +30% gain
+    tranche_a_pct: float = 0.60          # fraction of position to sell at Tranche A target
 
     # Time rules (24h ET, as "HH:MM" strings)
     am_window_start: str = "09:35"
@@ -38,11 +39,12 @@ class AutoGexConfig:
 
     # Daily limits
     max_trades_per_day: int = 5
+    max_concurrent_positions: int = 3    # hard cap on simultaneously open positions
     daily_loss_limit: float = 2000.0     # circuit breaker threshold (dollars, positive)
 
     # Cooldowns (seconds)
-    cooldown_after_entry: int = 120
-    cooldown_after_stop: int = 180
+    cooldown_after_entry: int = 300
+    cooldown_after_stop: int = 300
     cooldown_after_flip: int = 60
 
     # Engine
