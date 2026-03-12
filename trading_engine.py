@@ -425,7 +425,7 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: A
     def _do_fetch():
         return fetch_options_and_gex(
             scheduler.client,
-            "$SPY",
+            cfg.spy_underlying,
             cfg.strike_count,
             _previous_gex,
             scheduler.client_module,
@@ -444,7 +444,7 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: A
             try:
                 GammaExposureScheduler._proactive_schwab_token_refresh(scheduler.client)
                 result, api_err = fetch_options_and_gex(
-                    scheduler.client, "$SPY", cfg.strike_count, _previous_gex, scheduler.client_module
+                    scheduler.client, cfg.spy_underlying, cfg.strike_count, _previous_gex, scheduler.client_module
                 )
             except Exception as exc:
                 logger.error("[Engine] Token refresh failed: %s", exc)

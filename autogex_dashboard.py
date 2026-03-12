@@ -635,8 +635,34 @@ def _render_controls() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main render function
+# Main render functions
 # ---------------------------------------------------------------------------
+
+def render_autogex_panel() -> None:
+    """Render AutoGEX content for embedding in a combined layout.
+
+    Unlike render_autogex_view(), this function omits the page title,
+    sleep, and rerun — the caller is responsible for refresh timing.
+    """
+    _render_status_bar()
+    st.markdown("---")
+
+    last_signal_raw = get_engine_state("last_signal_json", {})
+    if isinstance(last_signal_raw, str):
+        try:
+            last_signal_raw = json.loads(last_signal_raw)
+        except Exception:
+            last_signal_raw = {}
+    last_signal: dict = last_signal_raw if isinstance(last_signal_raw, dict) else {}
+
+    _render_positions_and_signals(last_signal)
+    st.markdown("---")
+    _render_trade_log()
+    st.markdown("---")
+    _render_performance_metrics()
+    st.markdown("---")
+    _render_controls()
+
 
 def render_autogex_view() -> None:
     """Render the complete AutoGEX trading view."""

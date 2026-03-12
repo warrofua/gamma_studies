@@ -631,155 +631,6 @@ Use plain language. Reference actual numbers (strikes, distances). Do not hedge 
         return None
 
 
-# --- Page config and client init (before sidebar so we have default_symbol) ---
-st.set_page_config(
-    page_title="Gamma Exposure Dashboard",
-    page_icon="📊",
-    layout="wide",
-)
-
-client, broker_name, default_symbol, client_module = get_authenticated_client()
-if client is None:
-    st.stop()
-
-with st.sidebar:
-    view_mode = st.radio(
-        "Mode",
-        options=["GEX Dashboard", "AutoGEX Trading"],
-        index=0,
-        key="view_mode",
-        horizontal=False,
-    )
-    if view_mode == "AutoGEX Trading":
-        from autogex_dashboard import render_autogex_view
-        render_autogex_view()
-        st.stop()
-    st.title("Gamma Exposure")
-    if not os.environ.get("GEMINI_API_KEY"):
-        st.caption("💡 Set GEMINI_API_KEY in .env for AI interpretation")
-    strike_count = st.slider("Strike count", min_value=10, max_value=100, value=50, key="strikes")
-    refresh_interval = st.slider(
-        "Refresh interval (seconds)",
-        min_value=30,
-        max_value=300,
-        value=60,
-        step=15,
-        key="refresh",
-    )
-    strike_range = st.slider(
-        "Strike window (± from spot)",
-        min_value=200,
-        max_value=1000,
-        value=800,
-        step=50,
-        key="strike_range",
-        help="Only show strikes within ± this many points from spot",
-    )
-    gex_min_threshold = st.slider(
-        "GEX min threshold ($B)",
-        min_value=0.0,
-        max_value=10.0,
-        value=0.1,
-        step=0.1,
-        key="gex_threshold",
-        help="Hide strikes with |GEX| below this (0 = show all)",
-    )
-    if st.button("Refresh now"):
-        st.rerun()
-
-st.caption(f"Using {broker_name} API")
-
-# --- Display mode (main pane top) ---
-display_mode = st.radio(
-    "Display mode",
-    options=["Single Ticker", "Trinity Display"],
-    index=0,
-    key="display_mode",
-    horizontal=True,
-)
-all_symbol_options = ["SPX", "SPY", "QQQ"] + get_sp500_symbols()
-if display_mode == "Single Ticker":
-    single_ticker = st.selectbox(
-        "Symbol",
-        options=all_symbol_options,
-        index=1,  # SPY
-        key="single_ticker",
-    )
-    selected_symbols = [single_ticker]
-else:
-    selected_symbols = ["SPX", "SPY", "QQQ"]
-
-st.markdown("---")
-
-# --- Fetch all symbols ---
-if "previous_gex" not in st.session_state:
-    st.session_state.previous_gex = {}
-if "previous_gamma_velocity" not in st.session_state:
-    st.session_state.previous_gamma_velocity = {}
-if "previous_gamma_velocity_timestamp" not in st.session_state:
-    st.session_state.previous_gamma_velocity_timestamp = {}
-
-symbol_data: Dict[str, SymbolGexData] = {}
-fetch_errors: List[str] = []
-
-fetch_pairs = [(display_to_api_symbol(label), label) for label in selected_symbols]
-
-with st.spinner(f"Fetching {', '.join(selected_symbols)}..."):
-    for api_symbol, label in fetch_pairs:
-        prev = st.session_state.previous_gex.get(api_symbol, {})
-        result, err_msg = fetch_options_and_gex(
-            client, api_symbol, strike_count, prev, client_module
-        )
-        if result is None:
-            fetch_errors.append(f"{label}: {err_msg}")
-            continue
-        st.session_state.previous_gex[api_symbol] = dict(result[2])  # per_strike_gex
-        gamma_delta = result[6]
-        eastern = pytz.timezone("US/Eastern")
-        fetch_now = datetime.now(eastern)
-        prev_velocity = st.session_state.previous_gamma_velocity.get(api_symbol)
-        prev_timestamp = st.session_state.previous_gamma_velocity_timestamp.get(api_symbol)
-        st.session_state.previous_gamma_velocity[api_symbol] = gamma_delta
-        st.session_state.previous_gamma_velocity_timestamp[api_symbol] = fetch_now
-        processed = process_symbol_gex(result, strike_range, gex_min_threshold)
-        if processed is None:
-            fetch_errors.append(f"{label}: no strikes in window")
-            continue
-        processed.symbol = api_symbol
-        processed.label = label
-        processed.prev_gamma_velocity = prev_velocity
-        processed.prev_fetch_timestamp = prev_timestamp
-        symbol_data[label] = processed
-
-if not symbol_data:
-    all_refresh_errors = all("refresh_token" in (e or "").lower() for e in fetch_errors)
-    all_401_errors = all("401" in (e or "") for e in fetch_errors)
-    if (all_refresh_errors or all_401_errors) and fetch_errors:
-        _tp = str(Path.home() / "schwab_token.json")
-        try:
-            import secretsSchwab
-            _tp = str(getattr(secretsSchwab, "token_path", _tp))
-        except Exception:
-            pass
-        st.error(
-            "**Schwab token expired (401).** Refresh tokens expire after ~7 days of inactivity. "
-            f"Delete your token file and restart to re-authenticate:\n\n"
-            f"`rm {_tp}`\n\n"
-            "Then restart the app; you'll be prompted to complete the OAuth flow."
-        )
-    else:
-        st.error("Could not fetch any symbols. " + (" ".join(fetch_errors)))
-    st.stop()
-if fetch_errors:
-    for e in fetch_errors:
-        st.warning(e)
-
-last_update = datetime.now(pytz.timezone("US/Eastern")).strftime("%b %d, %Y %H:%M:%S ET")
-st.caption(f"Data as of {last_update}")
-
-selected_data = {k: v for k, v in symbol_data.items() if k in selected_symbols}
-
-
 def _build_alerts(data: SymbolGexData) -> List[Tuple[str, str]]:
     """Return a list of (icon, message) alert tuples for the given symbol data."""
     alerts = []
@@ -885,7 +736,7 @@ def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = Fal
         else:
             st.caption("No active alerts.")
     else:
-        # Multi-ticker: vertical layout (narrow column)
+        # Vertical layout — safe for use inside a parent column (no nested st.columns)
         st.markdown("#### Inference")
         dir_kn = "above" if (data.king_strike and data.spot_price > data.king_strike) else "below"
         st.metric("Distance to King Node", f"{data.dist_to_king:.0f} pts {dir_kn}" if data.dist_to_king else "—")
@@ -904,6 +755,35 @@ def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = Fal
         st.metric("Spot", f"${data.spot_price:.2f}")
         st.metric("King Node", f"${data.king_strike:.0f}" if data.king_strike else "—")
 
+        # Regime gauge (compact, single column)
+        if data.dist_to_flip_pct is not None and data.gamma_flip_strike is not None:
+            if data.dist_to_flip_pct > 1.0:
+                r_color, r_label = "#22c55e", "Stable"
+            elif data.dist_to_flip_pct >= 0.5:
+                r_color, r_label = "#eab308", "Transition"
+            else:
+                r_color, r_label = "#ef4444", "Volatile"
+            st.markdown(
+                f'**Regime:** <span style="color:{r_color}; font-weight:bold">'
+                f'{r_label} ({data.dist_to_flip_pct:.2f}% / {data.points_to_flip:.1f} pts to flip)</span>',
+                unsafe_allow_html=True,
+            )
+
+        # Gamma velocity (compact, single column)
+        if not data.is_first_fetch:
+            vel_delta = None
+            if data.prev_gamma_velocity is not None and time_ago_str:
+                accel = (data.gamma_delta or 0) - data.prev_gamma_velocity
+                vel_delta = f"${accel:+.3f}B vs {time_ago_str}"
+            st.metric("Gamma Velocity", f"${data.gamma_delta:+.3f}B", delta=vel_delta)
+            if data.top_strike_velocity_strike is not None and data.top_strike_velocity_value is not None:
+                st.metric(
+                    "Top Strike Velocity",
+                    f"${data.top_strike_velocity_strike:.0f}",
+                    delta=f"${data.top_strike_velocity_value:+.3f}B",
+                )
+                st.caption("Magnetic North — strike gaining gamma fastest")
+
     interp = generate_gex_interpretation(
         data.spot_price, data.total_gex, data.king_strike,
         data.downside_defense, data.upside_resistance, data.per_strike_gex
@@ -916,6 +796,205 @@ def _render_symbol_column(data: SymbolGexData, show_extended_metrics: bool = Fal
         st.markdown(f"<p style='line-height: 1.5; font-size: 0.9em;'>{interp.replace('$', '&#36;')}</p>", unsafe_allow_html=True)
         st.markdown("**Suggestions**")
         st.markdown(f"<p style='line-height: 1.5; font-size: 0.9em;'>{sugg.replace('$', '&#36;')}</p>", unsafe_allow_html=True)
+
+
+# --- Page config and client init (before sidebar so we have default_symbol) ---
+st.set_page_config(
+    page_title="Gamma Exposure Dashboard",
+    page_icon="📊",
+    layout="wide",
+)
+
+client, broker_name, default_symbol, client_module = get_authenticated_client()
+if client is None:
+    st.stop()
+
+with st.sidebar:
+    view_mode = st.radio(
+        "Mode",
+        options=["GEX Dashboard", "AutoGEX Trading"],
+        index=0,
+        key="view_mode",
+        horizontal=False,
+    )
+    st.title("Gamma Exposure")
+    if not os.environ.get("GEMINI_API_KEY"):
+        st.caption("💡 Set GEMINI_API_KEY in .env for AI interpretation")
+    if view_mode == "GEX Dashboard":
+        strike_count = st.slider("Strike count", min_value=10, max_value=100, value=50, key="strikes")
+        refresh_interval = st.slider(
+            "Refresh interval (seconds)",
+            min_value=30,
+            max_value=300,
+            value=60,
+            step=15,
+            key="refresh",
+        )
+        strike_range = st.slider(
+            "Strike window (± from spot)",
+            min_value=200,
+            max_value=1000,
+            value=800,
+            step=50,
+            key="strike_range",
+            help="Only show strikes within ± this many points from spot",
+        )
+        gex_min_threshold = st.slider(
+            "GEX min threshold ($B)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.1,
+            step=0.1,
+            key="gex_threshold",
+            help="Hide strikes with |GEX| below this (0 = show all)",
+        )
+    else:
+        # AutoGEX Trading mode: fixed defaults for the companion SPY heatmap
+        strike_count = 50
+        refresh_interval = 5
+        strike_range = 800
+        gex_min_threshold = 0.1
+    if st.button("Refresh now"):
+        st.rerun()
+
+st.caption(f"Using {broker_name} API")
+
+# --- AutoGEX Trading: side-by-side combined layout ---
+if view_mode == "AutoGEX Trading":
+    from autogex_dashboard import render_autogex_panel
+
+    if "previous_gex" not in st.session_state:
+        st.session_state.previous_gex = {}
+    if "previous_gamma_velocity" not in st.session_state:
+        st.session_state.previous_gamma_velocity = {}
+    if "previous_gamma_velocity_timestamp" not in st.session_state:
+        st.session_state.previous_gamma_velocity_timestamp = {}
+
+    # Fetch SPY data for the companion heatmap
+    spy_data = None
+    eastern = pytz.timezone("US/Eastern")
+    prev = st.session_state.previous_gex.get("SPY", {})
+    result, spy_err = fetch_options_and_gex(client, "SPY", strike_count, prev, client_module)
+    if result is not None:
+        st.session_state.previous_gex["SPY"] = dict(result[2])
+        prev_vel = st.session_state.previous_gamma_velocity.get("SPY")
+        prev_ts = st.session_state.previous_gamma_velocity_timestamp.get("SPY")
+        st.session_state.previous_gamma_velocity["SPY"] = result[6]
+        st.session_state.previous_gamma_velocity_timestamp["SPY"] = datetime.now(eastern)
+        processed = process_symbol_gex(result, strike_range, gex_min_threshold)
+        if processed is not None:
+            processed.symbol = "SPY"
+            processed.label = "SPY"
+            processed.prev_gamma_velocity = prev_vel
+            processed.prev_fetch_timestamp = prev_ts
+            spy_data = processed
+
+    autogex_col, gex_col = st.columns([3, 2])
+    with autogex_col:
+        render_autogex_panel()
+    with gex_col:
+        st.markdown("### SPY GEX")
+        if spy_data is not None:
+            _render_symbol_column(spy_data, show_extended_metrics=False)
+        elif spy_err:
+            st.warning(f"SPY fetch error: {spy_err}")
+        else:
+            st.info("No SPY data available.")
+
+    last_update = datetime.now(eastern).strftime("%b %d, %Y %H:%M:%S ET")
+    st.caption(f"Data as of {last_update} · Auto-refreshing every 5 seconds.")
+    time.sleep(5)
+    st.rerun()
+
+# --- Display mode (main pane top) ---
+display_mode = st.radio(
+    "Display mode",
+    options=["Single Ticker", "Trinity Display"],
+    index=0,
+    key="display_mode",
+    horizontal=True,
+)
+all_symbol_options = ["SPX", "SPY", "QQQ"] + get_sp500_symbols()
+if display_mode == "Single Ticker":
+    single_ticker = st.selectbox(
+        "Symbol",
+        options=all_symbol_options,
+        index=1,  # SPY
+        key="single_ticker",
+    )
+    selected_symbols = [single_ticker]
+else:
+    selected_symbols = ["SPX", "SPY", "QQQ"]
+
+st.markdown("---")
+
+# --- Fetch all symbols ---
+if "previous_gex" not in st.session_state:
+    st.session_state.previous_gex = {}
+if "previous_gamma_velocity" not in st.session_state:
+    st.session_state.previous_gamma_velocity = {}
+if "previous_gamma_velocity_timestamp" not in st.session_state:
+    st.session_state.previous_gamma_velocity_timestamp = {}
+
+symbol_data: Dict[str, SymbolGexData] = {}
+fetch_errors: List[str] = []
+
+fetch_pairs = [(display_to_api_symbol(label), label) for label in selected_symbols]
+
+with st.spinner(f"Fetching {', '.join(selected_symbols)}..."):
+    for api_symbol, label in fetch_pairs:
+        prev = st.session_state.previous_gex.get(api_symbol, {})
+        result, err_msg = fetch_options_and_gex(
+            client, api_symbol, strike_count, prev, client_module
+        )
+        if result is None:
+            fetch_errors.append(f"{label}: {err_msg}")
+            continue
+        st.session_state.previous_gex[api_symbol] = dict(result[2])  # per_strike_gex
+        gamma_delta = result[6]
+        eastern = pytz.timezone("US/Eastern")
+        fetch_now = datetime.now(eastern)
+        prev_velocity = st.session_state.previous_gamma_velocity.get(api_symbol)
+        prev_timestamp = st.session_state.previous_gamma_velocity_timestamp.get(api_symbol)
+        st.session_state.previous_gamma_velocity[api_symbol] = gamma_delta
+        st.session_state.previous_gamma_velocity_timestamp[api_symbol] = fetch_now
+        processed = process_symbol_gex(result, strike_range, gex_min_threshold)
+        if processed is None:
+            fetch_errors.append(f"{label}: no strikes in window")
+            continue
+        processed.symbol = api_symbol
+        processed.label = label
+        processed.prev_gamma_velocity = prev_velocity
+        processed.prev_fetch_timestamp = prev_timestamp
+        symbol_data[label] = processed
+
+if not symbol_data:
+    all_refresh_errors = all("refresh_token" in (e or "").lower() for e in fetch_errors)
+    all_401_errors = all("401" in (e or "") for e in fetch_errors)
+    if (all_refresh_errors or all_401_errors) and fetch_errors:
+        _tp = str(Path.home() / "schwab_token.json")
+        try:
+            import secretsSchwab
+            _tp = str(getattr(secretsSchwab, "token_path", _tp))
+        except Exception:
+            pass
+        st.error(
+            "**Schwab token expired (401).** Refresh tokens expire after ~7 days of inactivity. "
+            f"Delete your token file and restart to re-authenticate:\n\n"
+            f"`rm {_tp}`\n\n"
+            "Then restart the app; you'll be prompted to complete the OAuth flow."
+        )
+    else:
+        st.error("Could not fetch any symbols. " + (" ".join(fetch_errors)))
+    st.stop()
+if fetch_errors:
+    for e in fetch_errors:
+        st.warning(e)
+
+last_update = datetime.now(pytz.timezone("US/Eastern")).strftime("%b %d, %Y %H:%M:%S ET")
+st.caption(f"Data as of {last_update}")
+
+selected_data = {k: v for k, v in symbol_data.items() if k in selected_symbols}
 
 
 # --- King Node comparison and confluence (top) ---
