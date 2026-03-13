@@ -8,7 +8,7 @@ stop-out when the option price hadn't risen above the breakeven level yet.
 """
 
 import uuid
-from datetime import datetime, time
+from datetime import datetime, time, date
 from unittest.mock import patch
 
 import pytz
@@ -186,3 +186,165 @@ def test_stop_out_reason_includes_both_prices():
     reason = actions[0].reason
     assert "2.19" in reason, "option price must appear in stop-out reason"
     assert "2.21" in reason, "stop level must appear in stop-out reason"
+
+
+# ---------------------------------------------------------------------------
+# Same-strike concurrent cap
+# ---------------------------------------------------------------------------
+
+_MID_DAY_DT = _ET.localize(datetime.combine(date.today(), _MID_DAY))
+
+
+def _open_position_at_strike(pm, strike, entry_price=2.0):
+    """Helper: inject a pre-built position at the given strike into pm.positions."""
+    pos = _make_put_position(entry_price=entry_price, stop=1.0)
+    pos.strike = strike
+    pm.positions[pos.trade_id] = pos
+    return pos
+
+
+def _pm_with_time(cfg):
+    """Return a PositionManager with time frozen to mid-day (well inside entry window)."""
+    pm = PositionManager(cfg)
+    pm._time_et = lambda: _MID_DAY
+    pm._now_et = lambda: _MID_DAY_DT
+    return pm
+
+
+def test_same_strike_cap_blocks_third_position():
+    """Two positions at 667 already open — a third at 667 must be blocked."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+    _open_position_at_strike(pm, 667.0)
+    _open_position_at_strike(pm, 667.0)
+
+    ok, reason = pm.can_enter(strike=667.0)
+
+    assert not ok
+    assert "667" in reason
+    assert "same-strike" in reason.lower() or "cap" in reason.lower()
+
+
+def test_same_strike_cap_allows_second_position():
+    """One position at 667 — a second at 667 should be allowed."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+    _open_position_at_strike(pm, 667.0)
+
+    ok, _ = pm.can_enter(strike=667.0)
+
+    assert ok
+
+
+def test_same_strike_cap_allows_different_strike():
+    """Two positions at 667 already open — a new position at 665 must be allowed."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+    _open_position_at_strike(pm, 667.0)
+    _open_position_at_strike(pm, 667.0)
+
+    ok, _ = pm.can_enter(strike=665.0)
+
+    assert ok
+
+
+def test_can_enter_without_strike_skips_strike_checks():
+    """can_enter(strike=None) must not fail on strike-specific checks (backward compat)."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+    _open_position_at_strike(pm, 667.0)
+    _open_position_at_strike(pm, 667.0)
+
+    ok, _ = pm.can_enter()  # no strike arg
+
+    assert ok  # global limits not hit, no strike check performed
+
+
+# ---------------------------------------------------------------------------
+# Strike ban after consecutive pure stops
+# ---------------------------------------------------------------------------
+
+def _close_as_stop(pm, trade_id, pnl=-100.0):
+    """Helper: close a position with a pure stop-out reason."""
+    pm.close_position(trade_id, pnl, "Stop hit: option=1.50 <= stop=1.55")
+
+
+def _close_as_tranche_a_then_stop(pm, trade_id, pnl=50.0):
+    """Helper: close a position that had Tranche A taken before stopping out."""
+    pos = pm.positions.get(trade_id)
+    if pos:
+        pos.tranche_a_closed = True
+    pm.close_position(trade_id, pnl, "Stop hit: option=1.50 <= stop=1.55")
+
+
+def test_strike_banned_after_two_consecutive_pure_stops():
+    """Two pure stops at 663 with no Tranche A → strike must be banned."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+
+    pos1 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos1.trade_id)
+
+    pos2 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos2.trade_id)
+
+    ok, reason = pm.can_enter(strike=663.0)
+    assert not ok
+    assert "663" in reason
+    assert "banned" in reason.lower()
+
+
+def test_strike_not_banned_after_one_pure_stop():
+    """One pure stop at 663 should not ban the strike."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+
+    pos1 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos1.trade_id)
+
+    ok, _ = pm.can_enter(strike=663.0)
+    assert ok
+
+
+def test_tranche_a_exit_resets_stop_streak():
+    """
+    One pure stop at 663, then a position where Tranche A hits (partial win),
+    then another stop — streak resets at the Tranche A exit, so ban must NOT fire.
+    """
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+
+    pos1 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos1.trade_id)  # streak = 1
+
+    pos2 = _open_position_at_strike(pm, 663.0)
+    _close_as_tranche_a_then_stop(pm, pos2.trade_id)  # Tranche A taken → resets streak to 0
+
+    pos3 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos3.trade_id)  # streak = 1 again (not 2)
+
+    ok, _ = pm.can_enter(strike=663.0)
+    assert ok, "streak was reset by Tranche A exit — ban must not fire after only one subsequent stop"
+
+
+def test_strike_ban_resets_on_new_day():
+    """reset_daily() must clear the strike ban."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+
+    pos1 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos1.trade_id)
+    pos2 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos2.trade_id)
+
+    assert not pm.can_enter(strike=663.0)[0], "sanity: banned before reset"
+
+    pm.reset_daily()
+
+    ok, _ = pm.can_enter(strike=663.0)
+    assert ok, "ban must clear after reset_daily()"
+
+
+def test_strike_ban_does_not_affect_other_strikes():
+    """Banning 663 must not prevent entries at 665."""
+    pm = _pm_with_time(_make_cfg(max_concurrent_positions=5))
+
+    pos1 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos1.trade_id)
+    pos2 = _open_position_at_strike(pm, 663.0)
+    _close_as_stop(pm, pos2.trade_id)
+
+    ok, _ = pm.can_enter(strike=665.0)
+    assert ok
