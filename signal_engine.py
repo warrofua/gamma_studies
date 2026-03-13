@@ -246,6 +246,18 @@ def evaluate(data: SymbolGexData) -> SignalResult:
     gk_score, gk_dir = _signal_gatekeeper(state)
     vel_score, vel_dir = _signal_velocity(state)
 
+    # Dead-signal veto: no structure (gatekeeper=0) AND no momentum (velocity=0).
+    # King proximity alone is insufficient — price may be near the strike by chance.
+    if gk_score == 0 and vel_score == 0:
+        return SignalResult(
+            direction='NONE',
+            conviction=0,
+            signal_scores={'king_node': king_score, 'gatekeeper': 0, 'velocity': 0, 'regime': 0, 'flip_penalty': flip_score},
+            vetoed=True,
+            regime=state.regime,
+            timestamp=state.timestamp,
+        )
+
     # Determine primary direction by weighted vote
     call_score = sum(s for s, d in [(king_score, king_dir), (gk_score, gk_dir), (vel_score, vel_dir)] if d == 'CALL')
     put_score  = sum(s for s, d in [(king_score, king_dir), (gk_score, gk_dir), (vel_score, vel_dir)] if d == 'PUT')

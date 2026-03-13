@@ -59,6 +59,8 @@ class PositionManager:
         self.circuit_breaker_active: bool = False
         self.cooldown_until: Optional[datetime] = None  # single cooldown tracker
         self._eastern = pytz.timezone("US/Eastern")
+        self._strike_stop_streak: Dict[float, int] = {}  # consecutive pure stops per strike
+        self._banned_strikes: set = set()                # strikes banned for the rest of the day
 
     def _now_et(self) -> datetime:
         """Return current datetime in US/Eastern."""
@@ -68,7 +70,7 @@ class PositionManager:
         """Return current time component in US/Eastern."""
         return self._now_et().time()
 
-    def can_enter(self) -> Tuple[bool, str]:
+    def can_enter(self, strike: Optional[float] = None) -> Tuple[bool, str]:
         """Return (True, '') if a new trade can be opened, (False, reason) otherwise."""
         if self.circuit_breaker_active:
             return (False, "Circuit breaker active")
@@ -86,6 +88,13 @@ class PositionManager:
 
         if self.cooldown_until is not None and self._now_et() < self.cooldown_until:
             return (False, f"Cooldown until {self.cooldown_until.strftime('%H:%M:%S')}")
+
+        if strike is not None:
+            if strike in self._banned_strikes:
+                return (False, f"Strike {strike} banned after consecutive stops today")
+            same_strike = sum(1 for p in self.positions.values() if p.strike == strike)
+            if same_strike >= 2:
+                return (False, f"Same-strike cap (2) reached at {strike}")
 
         return (True, "")
 
@@ -119,7 +128,7 @@ class PositionManager:
         nearest_gk: Optional[float] = None,
     ) -> OpenPosition:
         """Create and register a new OpenPosition. Raises RuntimeError if entry not allowed."""
-        ok, reason = self.can_enter()
+        ok, reason = self.can_enter(strike=strike)
         if not ok:
             raise RuntimeError(f"Cannot enter position: {reason}")
 
@@ -249,6 +258,20 @@ class PositionManager:
 
     def close_position(self, trade_id: str, realized_pnl: float, reason: str) -> None:
         """Record realized P&L, remove position, and check circuit breaker."""
+        pos = self.positions.get(trade_id)
+        if pos:
+            # Track consecutive pure stop-outs per strike (Tranche A taken = not a pure stop).
+            # After 2 consecutive pure stops at the same strike, ban that strike for the day.
+            is_stop = reason.startswith('Stop hit')
+            if is_stop and not pos.tranche_a_closed:
+                streak = self._strike_stop_streak.get(pos.strike, 0) + 1
+                self._strike_stop_streak[pos.strike] = streak
+                if streak >= 2:
+                    self._banned_strikes.add(pos.strike)
+                    print(f"[PositionManager] Strike {pos.strike} banned after {streak} consecutive stops")
+            else:
+                self._strike_stop_streak[pos.strike] = 0
+
         self.daily_realized_pnl += realized_pnl
         self.positions.pop(trade_id, None)
         if self.daily_realized_pnl <= -self.cfg.daily_loss_limit:
@@ -273,3 +296,5 @@ class PositionManager:
         self.trades_today = 0
         self.daily_realized_pnl = 0.0
         self.circuit_breaker_active = False
+        self._strike_stop_streak = {}
+        self._banned_strikes = set()
