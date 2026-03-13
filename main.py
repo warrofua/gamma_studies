@@ -100,6 +100,7 @@ def _load_broker_client(preferred_broker: Optional[str] = None) -> Tuple[str, ob
         "Unable to locate a usable broker configuration.\n" + "\n".join(errors)
     )
 
+
 class GammaExposureScheduler:
     # Initialize and create dictionaries for temporary data storage and analysis
     def __init__(self, preferred_broker: Optional[str] = None):
@@ -171,7 +172,6 @@ class GammaExposureScheduler:
         except Exception:
             raise
 
-    #API auth
     def authenticate(self):
         try:
             auth_kwargs = {}
@@ -342,7 +342,6 @@ class GammaExposureScheduler:
                     self.plotter.update_plot_change_in_gamma(self.change_in_gamma_per_strike, largest_changes)
                     self.plotter.update_total_gamma_exposure_plot(current_timestamp, total_gamma_exposure, spot_price)
                     self.plotter.show_plots()
-                    pause_duration = 5
                 else:
                     body = r.text
                     try:
@@ -351,25 +350,21 @@ class GammaExposureScheduler:
                     except Exception:
                         pass
                     print(f"Failed to fetch data: {r.status_code} – {body}")
-                    pause_duration = 5  # Longer pause when fetch fails
         except Exception as e:
             print(f"An error occurred: {e}")
-            pause_duration = 5  # Longer pause on error
         finally:
-            # Always attempt to store data in the database, even if the fetch or plotting fails
             db_params = {
                 "dbname": "spx_options_data",
                 "user": "postgres",
                 "password": "password",
                 "host": "localhost"
             }
-            # Make sure to handle the case where data might not be defined due to failed fetch
             if 'data' in locals():
                 store_raw_options_data(db_params, data, now)
             else:
                 print("No data to store in database.")
 
-            plt.pause(pause_duration)  # Adjust pause based on operation outcome
+            plt.pause(5)
 
     def run(self):
         self.authenticate()

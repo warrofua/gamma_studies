@@ -1,0 +1,560 @@
+"""
+execution.py — Alpaca API connectivity layer (Phase 1: read-only + Phase 3: order placement)
+
+Provides AlpacaClient for account info, positions, option contracts,
+quotes, order queries, and order placement.
+
+Credentials are read from environment variables (already loaded via dotenv):
+    ALPACA_API_KEY
+    ALPACA_SECRET_KEY
+    ALPACA_PAPER   # "true" or "false", default "true"
+"""
+
+import logging
+import os
+import re
+import time as _time
+import requests as _requests
+
+logger = logging.getLogger("autogex")
+
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    GetOptionContractsRequest,
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+)
+from alpaca.trading.enums import ContractType, QueryOrderStatus, OrderSide, TimeInForce, OrderType
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.requests import OptionLatestQuoteRequest
+
+
+PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+LIVE_BASE_URL = "https://api.alpaca.markets"
+DATA_BASE_URL = "https://data.alpaca.markets"
+
+
+def _is_paper() -> bool:
+    """Returns True if ALPACA_PAPER env var is 'true' (case-insensitive) or not set."""
+    val = os.environ.get("ALPACA_PAPER", "true")
+    return val.strip().lower() == "true"
+
+
+def _looks_like_option(symbol: str) -> bool:
+    """Heuristic: option OCC symbols contain a date block + C/P + strike."""
+    # Standard OCC format: SPY   240119C00500000
+    return bool(re.search(r"\d{6}[CP]\d{8}", symbol))
+
+
+class AlpacaClient:
+    """Alpaca API client for connectivity, data retrieval, and order placement."""
+
+    def __init__(self):
+        api_key = os.environ.get("ALPACA_API_KEY", "")
+        secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+
+        if not api_key or not secret_key:
+            print("[Alpaca] WARNING: ALPACA_API_KEY and/or ALPACA_SECRET_KEY not set.")
+
+        paper = _is_paper()
+        self._base_url = PAPER_BASE_URL if paper else LIVE_BASE_URL
+        self._paper = paper
+        self._api_key = api_key
+        self._secret_key = secret_key
+
+        self._trading = TradingClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            paper=paper,
+        )
+
+        # Alias used by order placement methods
+        self._client = self._trading
+
+        # Option market data client (does not require paper flag)
+        self._option_data = OptionHistoricalDataClient(
+            api_key=api_key,
+            secret_key=secret_key,
+        )
+
+    # ------------------------------------------------------------------
+    # Account
+    # ------------------------------------------------------------------
+
+    def get_account(self) -> dict:
+        """
+        Returns account info as a dict with keys:
+            buying_power, cash, portfolio_value, currency
+        Returns an empty dict on failure.
+        """
+        try:
+            acct = self._trading.get_account()
+            return {
+                "buying_power": float(acct.buying_power),
+                "cash": float(acct.cash),
+                "portfolio_value": float(acct.portfolio_value),
+                "currency": str(acct.currency),
+            }
+        except Exception as e:
+            print(f"[Alpaca] error in get_account: {e}")
+            return {}
+
+    # ------------------------------------------------------------------
+    # Positions
+    # ------------------------------------------------------------------
+
+    def get_open_positions(self) -> list:
+        """
+        Returns list of open option positions as dicts with keys:
+            symbol, qty, avg_entry_price, current_price, unrealized_pl, side
+
+        Filters to positions where the asset class is 'us_option' or
+        the symbol looks like an OCC option contract.
+        Returns an empty list on failure.
+        """
+        try:
+            all_positions = self._trading.get_all_positions()
+            option_positions = []
+            for pos in all_positions:
+                asset_class = str(getattr(pos, "asset_class", "")).lower()
+                symbol = str(pos.symbol)
+                is_option = "option" in asset_class or _looks_like_option(symbol)
+                if not is_option:
+                    continue
+
+                current_price = None
+                try:
+                    current_price = float(pos.current_price) if pos.current_price is not None else None
+                except (TypeError, ValueError):
+                    pass
+
+                unrealized_pl = None
+                try:
+                    unrealized_pl = float(pos.unrealized_pl) if pos.unrealized_pl is not None else None
+                except (TypeError, ValueError):
+                    pass
+
+                option_positions.append({
+                    "symbol": symbol,
+                    "qty": int(float(pos.qty)),
+                    "avg_entry_price": float(pos.avg_entry_price),
+                    "current_price": current_price,
+                    "unrealized_pl": unrealized_pl,
+                    "side": str(pos.side.value if hasattr(pos.side, "value") else pos.side),
+                })
+            return option_positions
+        except Exception as e:
+            print(f"[Alpaca] error in get_open_positions: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Option contracts
+    # ------------------------------------------------------------------
+
+    def get_option_contracts(
+        self,
+        underlying: str,
+        expiration_date: str,
+        option_type: str,
+        strike_price: float,
+    ) -> list:
+        """
+        Fetch available option contracts matching the given parameters.
+
+        Args:
+            underlying:      e.g. "SPY"
+            expiration_date: "YYYY-MM-DD"
+            option_type:     "call" or "put"
+            strike_price:    e.g. 582.0
+
+        Returns list of dicts with keys:
+            symbol, strike_price, expiration_date, option_type,
+            open_interest, close_price
+        Returns empty list on failure.
+        """
+        try:
+            contract_type = ContractType.CALL if option_type.lower() == "call" else ContractType.PUT
+
+            # Use a small window around the strike to capture the exact contract
+            strike_str = str(strike_price)
+            req = GetOptionContractsRequest(
+                underlying_symbols=[underlying],
+                expiration_date=expiration_date,
+                type=contract_type,
+                strike_price_gte=strike_str,
+                strike_price_lte=strike_str,
+            )
+            response = self._trading.get_option_contracts(req)
+
+            # Response may be a model with .option_contracts list or an iterable
+            contracts_raw = []
+            if hasattr(response, "option_contracts"):
+                contracts_raw = response.option_contracts
+            elif hasattr(response, "__iter__"):
+                contracts_raw = list(response)
+
+            results = []
+            for c in contracts_raw:
+                results.append({
+                    "symbol": str(c.symbol),
+                    "strike_price": float(c.strike_price) if c.strike_price is not None else None,
+                    "expiration_date": str(c.expiration_date),
+                    "option_type": str(c.type.value if hasattr(c.type, "value") else c.type),
+                    "open_interest": int(c.open_interest) if c.open_interest is not None else None,
+                    "close_price": float(c.close_price) if c.close_price is not None else None,
+                })
+            return results
+        except Exception as e:
+            print(f"[Alpaca] error in get_option_contracts: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Option quotes
+    # ------------------------------------------------------------------
+
+    def get_latest_option_quote(self, symbol: str) -> dict | None:
+        """
+        Get the latest bid/ask for an option contract symbol.
+
+        Returns dict with keys: bid, ask, mid
+        Returns None on failure.
+        """
+        try:
+            req = OptionLatestQuoteRequest(symbol_or_symbols=symbol)
+            response = self._option_data.get_option_latest_quote(req)
+
+            # response is a dict keyed by symbol
+            quote = None
+            if isinstance(response, dict):
+                quote = response.get(symbol)
+            elif hasattr(response, symbol):
+                quote = getattr(response, symbol)
+
+            if quote is None:
+                return None
+
+            bid = float(quote.bid_price) if hasattr(quote, "bid_price") else float(quote.bp)
+            ask = float(quote.ask_price) if hasattr(quote, "ask_price") else float(quote.ap)
+            return {
+                "bid": bid,
+                "ask": ask,
+                "mid": round((bid + ask) / 2, 4),
+            }
+        except Exception as e:
+            print(f"[Alpaca] error in get_latest_option_quote: {e}")
+            # Fallback: REST API
+            return self._get_latest_option_quote_rest(symbol)
+
+    def _get_latest_option_quote_rest(self, symbol: str) -> dict | None:
+        """Fallback REST call for option quote if SDK fails."""
+        try:
+            url = f"{DATA_BASE_URL}/v1beta1/options/quotes/latest"
+            headers = {
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._secret_key,
+            }
+            resp = _requests.get(url, params={"symbols": symbol}, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            quotes = data.get("quotes", {})
+            q = quotes.get(symbol)
+            if q is None:
+                return None
+            bid = float(q.get("bp", 0))
+            ask = float(q.get("ap", 0))
+            return {
+                "bid": bid,
+                "ask": ask,
+                "mid": round((bid + ask) / 2, 4),
+            }
+        except Exception as e:
+            print(f"[Alpaca] error in _get_latest_option_quote_rest: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Orders
+    # ------------------------------------------------------------------
+
+    def cancel_all_orders(self) -> int:
+        """
+        Cancel all open orders.
+        Returns the count of cancelled orders.
+        """
+        try:
+            cancelled = self._trading.cancel_orders()
+            # cancel_orders returns a list of CancelOrderResponse objects
+            if isinstance(cancelled, list):
+                return len(cancelled)
+            return 0
+        except Exception as e:
+            print(f"[Alpaca] error in cancel_all_orders: {e}")
+            return 0
+
+    def get_orders(self, status: str = "open") -> list:
+        """
+        Returns list of orders as dicts with keys:
+            id, symbol, side, qty, filled_qty, status,
+            order_type, limit_price, filled_avg_price
+
+        Args:
+            status: "open", "closed", or "all"
+        Returns empty list on failure.
+        """
+        try:
+            status_map = {
+                "open": QueryOrderStatus.OPEN,
+                "closed": QueryOrderStatus.CLOSED,
+                "all": QueryOrderStatus.ALL,
+            }
+            query_status = status_map.get(status.lower(), QueryOrderStatus.OPEN)
+            req = GetOrdersRequest(status=query_status)
+            orders_raw = self._trading.get_orders(req)
+
+            results = []
+            for o in orders_raw:
+                limit_price = None
+                try:
+                    limit_price = float(o.limit_price) if o.limit_price is not None else None
+                except (TypeError, ValueError):
+                    pass
+
+                filled_avg_price = None
+                try:
+                    filled_avg_price = float(o.filled_avg_price) if o.filled_avg_price is not None else None
+                except (TypeError, ValueError):
+                    pass
+
+                results.append({
+                    "id": str(o.id),
+                    "symbol": str(o.symbol),
+                    "side": str(o.side.value if hasattr(o.side, "value") else o.side),
+                    "qty": float(o.qty) if o.qty is not None else None,
+                    "filled_qty": float(o.filled_qty) if o.filled_qty is not None else None,
+                    "status": str(o.status.value if hasattr(o.status, "value") else o.status),
+                    "order_type": str(
+                        o.order_type.value if hasattr(o.order_type, "value") else o.order_type
+                    ),
+                    "limit_price": limit_price,
+                    "filled_avg_price": filled_avg_price,
+                })
+            return results
+        except Exception as e:
+            print(f"[Alpaca] error in get_orders: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Order placement (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _order_to_dict(self, order) -> dict:
+        """Convert an Alpaca order object to a plain dict."""
+        return {
+            'id': str(getattr(order, 'id', None)),
+            'symbol': getattr(order, 'symbol', None),
+            'qty': int(getattr(order, 'qty', None)) if getattr(order, 'qty', None) else 0,
+            'filled_qty': int(getattr(order, 'filled_qty', None)) if getattr(order, 'filled_qty', None) else 0,
+            'status': str(getattr(order, 'status', None)),
+            'order_type': str(getattr(order, 'order_type', None)),
+            'limit_price': float(getattr(order, 'limit_price', None)) if getattr(order, 'limit_price', None) else None,
+            'filled_avg_price': float(getattr(order, 'filled_avg_price', None)) if getattr(order, 'filled_avg_price', None) else None,
+        }
+
+    def _poll_for_fill(self, order_id, timeout_secs: int = 10, poll_interval: int = 2) -> object | None:
+        """
+        Poll an order by ID until filled or timeout. Returns final order object.
+        Returns None if the order is not filled within timeout_secs.
+        """
+        elapsed = 0
+        order = None
+        while elapsed < timeout_secs:
+            _time.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                order = self._client.get_order_by_id(order_id)
+                status = str(getattr(order, 'status', '')).lower()
+                if 'filled' in status:
+                    return order
+            except Exception as e:
+                print(f"[Alpaca] error polling order {order_id}: {e}")
+        return None  # not filled within timeout
+
+    def place_limit_buy(self, symbol: str, qty: int, limit_price: float) -> dict | None:
+        """
+        Place a limit buy. Returns order dict on success, None on failure.
+        Retries once at ask price if not filled within 10s, then falls back to market.
+
+        Returns dict with keys: id, symbol, qty, filled_qty, status, limit_price, filled_avg_price
+        """
+        # --- Attempt 1: initial limit order ---
+        try:
+            req = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(limit_price, 2),
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Limit buy attempt 1: {symbol} x{qty} @ {limit_price:.2f} | id={order.id}")
+        except Exception as e:
+            print(f"[Alpaca] error submitting limit buy (attempt 1) for {symbol}: {e}")
+            return None
+
+        filled_order = self._poll_for_fill(order.id, timeout_secs=10, poll_interval=2)
+        if filled_order is not None:
+            return self._order_to_dict(filled_order)
+
+        # Not filled — cancel and retry at a penny improvement
+        try:
+            self._client.cancel_order_by_id(order.id)
+            print(f"[Alpaca] Limit buy attempt 1 not filled; cancelled. Repricing.")
+        except Exception as e:
+            print(f"[Alpaca] error cancelling order {order.id}: {e}")
+
+        # --- Attempt 2: repriced limit order ---
+        retry_price = round(limit_price + 0.02, 2)
+        try:
+            req = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=retry_price,
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Limit buy attempt 2: {symbol} x{qty} @ {retry_price:.2f} | id={order.id}")
+        except Exception as e:
+            print(f"[Alpaca] error submitting limit buy (attempt 2) for {symbol}: {e}")
+            return None
+
+        filled_order = self._poll_for_fill(order.id, timeout_secs=10, poll_interval=2)
+        if filled_order is not None:
+            return self._order_to_dict(filled_order)
+
+        # Still not filled — cancel and fall back to market
+        try:
+            self._client.cancel_order_by_id(order.id)
+            print(f"[Alpaca] Limit buy attempt 2 not filled; falling back to market order.")
+        except Exception as e:
+            print(f"[Alpaca] error cancelling order {order.id}: {e}")
+
+        # --- Attempt 3: market order fallback ---
+        try:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self._client.submit_order(req)
+            print(f"[Alpaca] Market buy fallback: {symbol} x{qty} | id={order.id}")
+            return self._order_to_dict(order)
+        except Exception as e:
+            print(f"[Alpaca] error submitting market buy fallback for {symbol}: {e}")
+            return None
+
+    def place_market_sell(self, symbol: str, qty: int) -> dict | None:
+        """Place a market sell order. Used for stops, partial exits, and hard close.
+
+        Guards against overselling: checks current Alpaca position before submitting.
+        If we hold fewer contracts than qty (including 0), caps or skips the order to
+        avoid accidentally opening a short.
+        """
+        # --- Position guard: never sell more than we actually hold ---
+        try:
+            current_positions = {p['symbol']: p for p in self.get_open_positions()}
+            held = current_positions.get(symbol)
+            if held is None or held['qty'] <= 0:
+                logger.warning(
+                    "[Alpaca] Skipping market sell %s x%d — Alpaca shows no long position (qty=%s). "
+                    "Would have opened a short. Possible duplicate sell.",
+                    symbol, qty, held['qty'] if held else 0,
+                )
+                return None
+            if held['qty'] < qty:
+                logger.warning(
+                    "[Alpaca] Capping market sell %s from %d to %d contracts (only %d held in Alpaca).",
+                    symbol, qty, held['qty'], held['qty'],
+                )
+                qty = held['qty']
+        except Exception as e:
+            logger.warning("[Alpaca] Position check before sell failed for %s: %s — proceeding anyway", symbol, e)
+
+        try:
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self._client.submit_order(req)
+            logger.info("[Alpaca] Market sell submitted: %s x%d | id=%s", symbol, qty, order.id)
+            return self._order_to_dict(order)
+        except Exception as e:
+            logger.error("[Alpaca] error in place_market_sell for %s: %s", symbol, e)
+            return None
+
+    def close_all_option_positions(self) -> list[dict]:
+        """
+        Market-sell all open option positions.
+        Used for hard close (3:55 PM) and circuit breaker.
+        Returns list of submitted order dicts.
+        """
+        positions = self.get_open_positions()
+        if not positions:
+            logger.info("[Alpaca] close_all_option_positions: no open positions found")
+            return []
+        logger.info("[Alpaca] close_all_option_positions: closing %d position(s)", len(positions))
+        results = []
+        for pos in positions:
+            qty = int(pos['qty'])
+            if qty <= 0:
+                logger.warning("[Alpaca] close_all skipping %s — qty=%d (not long)", pos['symbol'], qty)
+                continue
+            order_dict = self.place_market_sell(pos['symbol'], qty)
+            if order_dict is not None:
+                results.append(order_dict)
+        return results
+
+    def reconcile_positions(self, pm_positions: dict) -> list[str]:
+        """
+        On engine startup: compare Alpaca open positions vs PositionManager state.
+        Returns list of trade_ids that are stale (in DB but not in Alpaca, or Alpaca
+        shows non-positive qty) so the caller can remove them from pm and the DB.
+        Called once at startup.
+        """
+        alpaca_positions = {p['symbol']: p for p in self.get_open_positions()}
+        pm_symbols = {pos.symbol for pos in pm_positions.values()}
+
+        for sym in alpaca_positions:
+            if sym not in pm_symbols:
+                logger.warning(
+                    "[Reconcile] Alpaca has position in %s not tracked by engine — manual review needed", sym
+                )
+
+        stale_trade_ids = []
+        for trade_id, pos in pm_positions.items():
+            sym = pos.symbol
+            alpaca_pos = alpaca_positions.get(sym)
+            if alpaca_pos is None:
+                logger.warning(
+                    "[Reconcile] Engine tracks %s (trade %s) but Alpaca shows no position — "
+                    "removing stale state to prevent duplicate sells",
+                    sym, trade_id[:8],
+                )
+                stale_trade_ids.append(trade_id)
+            elif alpaca_pos['qty'] <= 0:
+                logger.warning(
+                    "[Reconcile] Engine tracks %s (trade %s) as LONG but Alpaca qty=%d — "
+                    "removing stale state to prevent duplicate sells",
+                    sym, trade_id[:8], alpaca_pos['qty'],
+                )
+                stale_trade_ids.append(trade_id)
+
+        return stale_trade_ids
+
+    def get_option_mid_price(self, symbol: str) -> float | None:
+        """Get mid price (bid+ask)/2 for an option. Returns None if unavailable."""
+        quote = self.get_latest_option_quote(symbol)
+        return quote['mid'] if quote else None
