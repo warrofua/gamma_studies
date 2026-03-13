@@ -4,8 +4,10 @@ Run with:  python -m pytest test_eod_report.py -v
 """
 
 import pytest
+from unittest.mock import MagicMock, patch
 from eod_report import (
     _classify_exit_reason,
+    _run_eod_report,
     fmt_r,
     group_trades_by_trade_id,
     safe_r_multiple,
@@ -251,3 +253,52 @@ def test_group_weighted_avg_exit_price():
     ]
     result = group_trades_by_trade_id(rows)
     assert result[0].avg_exit_price == pytest.approx(2.30)
+
+
+# ---------------------------------------------------------------------------
+# _run_eod_report (standalone entry point — primary launchd trigger)
+# ---------------------------------------------------------------------------
+
+@patch("eod_report.notify_email")
+@patch("eod_report.log_report")
+@patch("eod_report.store_report")
+@patch("eod_report.generate_session_report")
+@patch("eod_report.get_trade_count_for_date", return_value=0)
+@patch("eod_report.eod_report_exists", return_value=False)
+def test_run_eod_report_no_trades_skips(mock_exists, mock_count, mock_gen, mock_store, mock_log, mock_email):
+    """Zero trades today → report is skipped, nothing generated or emailed."""
+    _run_eod_report("2026-03-13")
+    mock_gen.assert_not_called()
+    mock_email.assert_not_called()
+
+
+@patch("eod_report.notify_email")
+@patch("eod_report.log_report")
+@patch("eod_report.store_report")
+@patch("eod_report.generate_session_report")
+@patch("eod_report.get_trade_count_for_date", return_value=3)
+@patch("eod_report.eod_report_exists", return_value=False)
+def test_run_eod_report_with_trades_generates_and_emails(mock_exists, mock_count, mock_gen, mock_store, mock_log, mock_email):
+    """Trades exist and no report yet → full pipeline runs."""
+    mock_report = MagicMock()
+    mock_report.trade_count = 3
+    mock_report.total_pnl = 450.0
+    mock_report.avg_r = 1.5
+    mock_gen.return_value = mock_report
+
+    _run_eod_report("2026-03-13")
+
+    mock_gen.assert_called_once_with("2026-03-13")
+    mock_store.assert_called_once_with(mock_report)
+    mock_log.assert_called_once_with(mock_report)
+    mock_email.assert_called_once_with(mock_report)
+
+
+@patch("eod_report.notify_email")
+@patch("eod_report.generate_session_report")
+@patch("eod_report.eod_report_exists", return_value=True)
+def test_run_eod_report_idempotent_skips_if_already_stored(mock_exists, mock_gen, mock_email):
+    """Report already stored for today → skip entirely (idempotent)."""
+    _run_eod_report("2026-03-13")
+    mock_gen.assert_not_called()
+    mock_email.assert_not_called()

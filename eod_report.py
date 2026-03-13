@@ -4,8 +4,10 @@ Generates a per-session summary with combined trade view (tranche A + B grouped
 into one logical trade), R-multiples, capital risk context, weekly/monthly P&L,
 and optional email notification.
 
-Triggered once per day by trading_engine.py after market close,
-if and only if at least one trade was executed that day.
+Primary trigger: launchd job at 4:00 PM ET (eod_report.py __main__), which
+fires regardless of engine state. Secondary trigger: trading_engine.py shutdown
+fallback after hard_close_time, in case the engine is still running at EOD.
+Both paths are idempotent — only one report is generated per day.
 
 Data flow:
     trade_journal.get_trades_for_date(date)
@@ -33,6 +35,7 @@ from typing import List, Optional
 from trade_journal import (
     eod_report_exists,
     get_monthly_pnl,
+    get_trade_count_for_date,
     get_trades_for_date,
     get_weekly_pnl,
     upsert_eod_report,
@@ -452,3 +455,51 @@ def notify_email(report: SessionReport) -> None:
         logger.info("[EOD] Email sent to %s", to_addr)
     except Exception as exc:
         logger.warning("[EOD] Email notification failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Standalone entry point (called by launchd at 4:00 PM ET Mon–Fri)
+# ---------------------------------------------------------------------------
+
+def _run_eod_report(date_str: str) -> None:
+    """Generate, store, log, and email the EOD report for *date_str*.
+
+    Idempotent — safe to call multiple times; skips if report already stored
+    or if no trades were placed on that date.
+    """
+    if eod_report_exists(date_str):
+        logger.info("[EOD] Report already exists for %s — skipping.", date_str)
+        return
+
+    trade_count = get_trade_count_for_date(date_str)
+    if trade_count == 0:
+        logger.info("[EOD] No trades on %s — skipping.", date_str)
+        return
+
+    logger.info("[EOD] Generating report for %s (%d trades)...", date_str, trade_count)
+    report = generate_session_report(date_str)
+    store_report(report)
+    log_report(report)
+    notify_email(report)
+    logger.info("[EOD] Done — P&L: %s | trades: %d | avg R: %s",
+                _fmt_pnl(report.total_pnl), report.trade_count, fmt_r(report.avg_r))
+
+
+if __name__ == "__main__":
+    import logging as _logging
+    from datetime import date as _date
+    from pathlib import Path as _Path
+
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _load_dotenv(_Path(__file__).resolve().parent / ".env")
+    except ImportError:
+        pass
+
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    _run_eod_report(_date.today().isoformat())

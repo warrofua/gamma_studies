@@ -528,17 +528,24 @@ def _flush_positions_to_journal(pm: PositionManager, reason: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _maybe_generate_eod_report(pm: PositionManager, cfg) -> None:
-    """Generate EOD report if: after market close, no report yet today, ≥1 trade.
+    """Belt-and-suspenders EOD report trigger fired on engine shutdown.
 
-    Idempotent — safe to call on every engine shutdown. Skips silently if the
-    engine stopped before market close or if no trades were taken today.
+    Primary trigger is the launchd job at 4:00 PM ET (eod_report.py __main__),
+    which runs regardless of engine state. This path fires only when the engine
+    is still running at hard_close_time and then shuts down — ensuring the
+    report goes out even if launchd fires slightly late or misses.
+
+    Skips silently if:
+      - Engine exits before hard_close_time (launchd handles it)
+      - Report already exists for today (idempotent)
+      - No trades were placed today
     """
     now_et = datetime.now(_ET)
     hc_h, hc_m = map(int, cfg.hard_close_time.split(":"))
     hard_close_dt = now_et.replace(hour=hc_h, minute=hc_m, second=0, microsecond=0)
 
     if now_et < hard_close_dt:
-        logger.info("[Engine] EOD report skipped — engine stopped before market close.")
+        logger.info("[Engine] EOD report skipped on shutdown — before hard close (launchd will handle at 4 PM).")
         return
 
     today_str = date.today().isoformat()

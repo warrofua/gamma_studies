@@ -1,13 +1,16 @@
-"""Unit tests for trading_engine.py — caffeinate sleep-prevention helpers.
+"""Unit tests for trading_engine.py — caffeinate sleep-prevention helpers
+and EOD report shutdown trigger.
 
 Run with:  python -m pytest test_trading_engine.py -v
 """
 
 import platform
 import subprocess
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+import pytz
 
 import trading_engine
 
@@ -87,3 +90,46 @@ def test_stop_caffeinate_force_kills_on_timeout():
 
     mock_proc.kill.assert_called_once()
     assert trading_engine._caffeinate_proc is None
+
+
+# ---------------------------------------------------------------------------
+# _maybe_generate_eod_report — belt-and-suspenders shutdown trigger
+# ---------------------------------------------------------------------------
+
+def _make_cfg(hard_close_time="15:55"):
+    cfg = MagicMock()
+    cfg.hard_close_time = hard_close_time
+    return cfg
+
+
+_ET = pytz.timezone("US/Eastern")
+
+
+@patch("trading_engine.get_trade_count_for_date", return_value=2)
+@patch("trading_engine.eod_report_exists", return_value=False)
+@patch("trading_engine._eod_report")
+def test_maybe_eod_report_skips_before_hard_close(mock_eod, mock_exists, mock_count):
+    """Engine exits before hard_close_time → skip (launchd is primary trigger)."""
+    early = _ET.localize(datetime(2026, 3, 13, 10, 0, 0))  # 10 AM ET
+    with patch("trading_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = early
+        trading_engine._maybe_generate_eod_report(MagicMock(), _make_cfg("15:55"))
+
+    mock_eod.generate_session_report.assert_not_called()
+
+
+@patch("trading_engine.get_trade_count_for_date", return_value=2)
+@patch("trading_engine.eod_report_exists", return_value=False)
+@patch("trading_engine._eod_report")
+def test_maybe_eod_report_fires_after_hard_close(mock_eod, mock_exists, mock_count):
+    """Engine exits at or after hard_close_time with trades → report generated."""
+    after_close = _ET.localize(datetime(2026, 3, 13, 16, 5, 0))  # 4:05 PM ET
+    mock_report = MagicMock()
+    mock_eod.generate_session_report.return_value = mock_report
+
+    with patch("trading_engine.datetime") as mock_dt:
+        mock_dt.now.return_value = after_close
+        trading_engine._maybe_generate_eod_report(MagicMock(), _make_cfg("15:55"))
+
+    mock_eod.generate_session_report.assert_called_once()
+    mock_eod.notify_email.assert_called_once_with(mock_report)
