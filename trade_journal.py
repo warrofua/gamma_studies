@@ -214,9 +214,9 @@ def delete_position(trade_id: str) -> None:
 
 
 def get_open_positions() -> list[dict]:
-    """SELECT all rows from positions, return as list of dicts."""
+    """SELECT rows from positions with remaining_qty > 0, return as list of dicts."""
     with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("SELECT * FROM positions")
+        cursor = conn.execute("SELECT * FROM positions WHERE remaining_qty > 0")
         col_names = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
         return [dict(zip(col_names, row)) for row in rows]

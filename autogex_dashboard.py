@@ -268,6 +268,7 @@ def _render_status_bar() -> None:
 # Row 2 — Positions (left) + Live signal (right)
 # ---------------------------------------------------------------------------
 
+@st.fragment(run_every=5)
 def _render_positions() -> None:
     positions = get_open_positions()
     if not positions:
@@ -772,7 +773,15 @@ def _render_session_view(date_str: str) -> None:
     avg_r = round(sum(valid_rs) / len(valid_rs), 2) if valid_rs else None
     win_rate = len(wins) / len(combined) * 100 if combined else 0.0
 
-    m1, m2, m3, m4 = st.columns(4)
+    # Outcome counts for breakdown metric (#4)
+    from collections import Counter
+    outcome_counts = Counter(_outcome_label(t.exit_reason) for t in combined)
+    runs = outcome_counts.get("✅ ran", 0)
+    stops = outcome_counts.get("🛑 stop", 0)
+    eod_closes = outcome_counts.get("🔔 EOD", 0)
+    outcome_str = f"{runs}R / {stops}S / {eod_closes}E"
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     pnl_color = "#28a745" if total_pnl >= 0 else "#dc3545"
     with m1:
         st.caption("Daily P&L")
@@ -800,6 +809,13 @@ def _render_session_view(date_str: str) -> None:
         st.markdown(
             f'<span style="font-size:1.3em; font-weight:bold">'
             f'{_fmt_r_display(avg_r)}</span>',
+            unsafe_allow_html=True,
+        )
+    with m5:
+        st.caption("Ran / Stop / EOD")
+        st.markdown(
+            f'<span style="font-size:1.3em; font-weight:bold">'
+            f'{outcome_str}</span>',
             unsafe_allow_html=True,
         )
 
@@ -832,8 +848,16 @@ def _render_session_view(date_str: str) -> None:
             })
 
         df = pd.DataFrame(rows)
+
+        # P&L color coding (#2): green for winners, red for losers
+        def _color_pnl(val):
+            if val is None:
+                return ""
+            return "color: #28a745" if val >= 0 else "color: #dc3545"
+
+        styled_df = df.style.map(_color_pnl, subset=["P&L"])
         st.dataframe(
-            df,
+            styled_df,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -844,6 +868,23 @@ def _render_session_view(date_str: str) -> None:
                 "Strike": st.column_config.NumberColumn("Strike", format="%.0f"),
             },
         )
+
+        # Equity curve (#1): cumulative P&L by entry time
+        equity_rows = []
+        cumulative = 0.0
+        for t in combined:
+            cumulative += t.total_pnl
+            try:
+                entry_dt = datetime.fromisoformat(t.entry_time)
+                label = entry_dt.strftime("%H:%M")
+            except Exception:
+                label = str(len(equity_rows) + 1)
+            equity_rows.append({"Time": label, "Cumulative P&L": round(cumulative, 2)})
+
+        if equity_rows:
+            eq_df = pd.DataFrame(equity_rows).set_index("Time")
+            st.markdown("**Equity Curve**")
+            st.line_chart(eq_df, use_container_width=True)
 
         # Tranche detail expanders (only for two-tranche trades)
         for t in combined:
@@ -875,6 +916,38 @@ def _render_session_view(date_str: str) -> None:
             disabled=len(df) == 0,
             key=f"export_session_{date_str}",
         )
+
+        # Conviction correlation table (#7)
+        conv_data = {}
+        for t in combined:
+            c = t.conviction
+            if c not in conv_data:
+                conv_data[c] = []
+            conv_data[c].append(t.total_pnl)
+
+        if len(conv_data) > 1:
+            st.markdown("**Conviction Breakdown**")
+            conv_rows = []
+            for c in sorted(conv_data.keys()):
+                pnls = conv_data[c]
+                w = [p for p in pnls if p > 0]
+                conv_rows.append({
+                    "Conviction": c,
+                    "Trades": len(pnls),
+                    "Win Rate": f"{len(w)/len(pnls)*100:.0f}%",
+                    "Avg P&L": round(sum(pnls) / len(pnls), 2),
+                    "Total P&L": round(sum(pnls), 2),
+                })
+            conv_df = pd.DataFrame(conv_rows)
+            st.dataframe(
+                conv_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Avg P&L": st.column_config.NumberColumn("Avg P&L", format="$%.2f"),
+                    "Total P&L": st.column_config.NumberColumn("Total P&L", format="$%.2f"),
+                },
+            )
 
     # Open positions (live session only)
     if open_positions:
@@ -909,10 +982,12 @@ def _render_weekly_view(date_str: str) -> None:
     )
     st.markdown("")
 
-    # Day-by-day breakdown
+    # Day-by-day breakdown — iterate full Mon–Fri for past weeks (#8)
+    today = date.today()
+    end_of_range = min(friday, today)
     summaries = []
     cursor = monday
-    while cursor <= d:
+    while cursor <= end_of_range:
         s = get_daily_summary(cursor.isoformat())
         if s:
             tc = s.get("trade_count", 0)
@@ -930,6 +1005,25 @@ def _render_weekly_view(date_str: str) -> None:
         cursor += timedelta(days=1)
 
     if summaries:
+        # Daily P&L bar chart (#3)
+        chart_df = pd.DataFrame(summaries)[["Date", "P&L"]]
+        chart_df["color"] = chart_df["P&L"].apply(
+            lambda v: "#28a745" if v >= 0 else "#dc3545"
+        )
+        import altair as alt
+        bar_chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Date:N", sort=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("P&L:Q", title="P&L ($)"),
+                color=alt.Color("color:N", scale=None),
+                tooltip=["Date", alt.Tooltip("P&L:Q", format="$,.2f")],
+            )
+            .properties(height=200)
+        )
+        st.altair_chart(bar_chart, use_container_width=True)
+
         df = pd.DataFrame(summaries)
         st.dataframe(
             df,
@@ -985,12 +1079,33 @@ def _render_monthly_view(date_str: str) -> None:
                 "P&L": s.get("total_pnl", 0.0),
                 "Trades": tc,
                 "Win Rate": f"{wc/tc*100:.0f}%" if tc > 0 else "—",
+                "Avg Winner": s.get("avg_winner", 0.0) or None,  # (#5) added to match weekly
+                "Avg Loser": s.get("avg_loser", 0.0) or None,    # (#5) added to match weekly
                 "Largest Win": s.get("largest_win", 0.0) or None,
                 "Largest Loss": s.get("largest_loss", 0.0) or None,
             })
         cursor += timedelta(days=1)
 
     if summaries:
+        # Daily P&L bar chart (#3)
+        import altair as alt
+        chart_df = pd.DataFrame(summaries)[["Date", "P&L"]]
+        chart_df["color"] = chart_df["P&L"].apply(
+            lambda v: "#28a745" if v >= 0 else "#dc3545"
+        )
+        bar_chart = (
+            alt.Chart(chart_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("Date:N", sort=None, axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y("P&L:Q", title="P&L ($)"),
+                color=alt.Color("color:N", scale=None),
+                tooltip=["Date", alt.Tooltip("P&L:Q", format="$,.2f")],
+            )
+            .properties(height=200)
+        )
+        st.altair_chart(bar_chart, use_container_width=True)
+
         df = pd.DataFrame(summaries)
         st.dataframe(
             df,
@@ -998,6 +1113,8 @@ def _render_monthly_view(date_str: str) -> None:
             hide_index=True,
             column_config={
                 "P&L": st.column_config.NumberColumn("P&L", format="$%.2f"),
+                "Avg Winner": st.column_config.NumberColumn("Avg Winner", format="$%.2f"),
+                "Avg Loser": st.column_config.NumberColumn("Avg Loser", format="$%.2f"),
                 "Largest Win": st.column_config.NumberColumn("Largest Win", format="$%.2f"),
                 "Largest Loss": st.column_config.NumberColumn("Largest Loss", format="$%.2f"),
             },
@@ -1027,7 +1144,7 @@ def _render_reports_tab() -> None:
     date_str = selected_date.isoformat()
 
     tab_session, tab_weekly, tab_monthly = st.tabs(
-        ["📅 Today's Session", "📆 Weekly", "🗓 Monthly"]
+        ["📅 Session", "📆 Weekly", "🗓 Monthly"]
     )
 
     with tab_session:

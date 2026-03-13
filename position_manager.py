@@ -180,7 +180,7 @@ class PositionManager:
                 pos.trade_id,
                 'stop_out',
                 pos.remaining_qty,
-                f'Stop hit at {current_price:.2f}',
+                f'Stop hit: option={current_price:.2f} <= stop={pos.current_stop:.2f}',
             )]
 
         if past_hard_close:
@@ -195,9 +195,12 @@ class PositionManager:
                 triggered = True
 
             if triggered:
-                pos.gatekeeper_cleared = True
                 new_stop = round(pos.entry_price + self.cfg.breakeven_buffer, 2)
-                if new_stop > pos.current_stop:
+                # Only apply the breakeven stop if the option price is already above it.
+                # If not, leave gatekeeper_cleared=False so this retries next tick —
+                # prevents the stop from being set above current price and firing immediately.
+                if new_stop > pos.current_stop and new_stop < current_price:
+                    pos.gatekeeper_cleared = True
                     pos.current_stop = new_stop
                     actions.append(PositionAction(
                         pos.trade_id,

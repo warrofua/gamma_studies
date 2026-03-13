@@ -13,7 +13,9 @@ import json as _json
 import logging
 import logging.handlers
 import os
+import platform
 import signal as _signal
+import subprocess as _subprocess
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -85,6 +87,96 @@ _previous_gex: dict = {}
 _current_date: Optional[date] = None
 
 _ET = pytz.timezone("US/Eastern")
+
+
+# ---------------------------------------------------------------------------
+# Schwab session timeout helper
+# ---------------------------------------------------------------------------
+
+_SCHWAB_REQUEST_TIMEOUT = 20  # seconds — prevents infinite hangs on auth or API calls
+
+def _apply_request_timeout(client: object, timeout: float = _SCHWAB_REQUEST_TIMEOUT) -> None:
+    """Inject a default timeout into all requests made by the Schwab client.
+
+    Without this, client.get_option_chain() (and the authlib token refresh it
+    triggers internally) can hang indefinitely when Schwab's server accepts the
+    TCP connection but stops sending data — e.g., after receiving an invalid or
+    rotated refresh token.  The monkey-patch flows through requests.Session.request,
+    the single choke-point for every HTTP call the client makes.
+    """
+    session = getattr(client, "session", None)
+    if session is None:
+        return
+    _orig = session.request
+
+    def _request_with_timeout(method, url, **kwargs):
+        kwargs.setdefault("timeout", timeout)
+        return _orig(method, url, **kwargs)
+
+    session.request = _request_with_timeout
+
+
+# ---------------------------------------------------------------------------
+# Sleep prevention (macOS caffeinate)
+# ---------------------------------------------------------------------------
+#
+# Lifecycle:
+#
+#   main() start
+#       │
+#       └─ _start_caffeinate()
+#               ├─ non-Darwin → warning, no-op
+#               ├─ caffeinate missing → warning, no-op
+#               └─ Popen(["caffeinate", "-dims"]) → _caffeinate_proc set
+#
+#   main() finally block (all exit paths: normal, SIGINT, SIGTERM, exception)
+#       │
+#       └─ _stop_caffeinate()
+#               ├─ _caffeinate_proc is None → no-op
+#               ├─ .terminate() + .wait(timeout=3) → clean exit
+#               └─ .wait() timeout → .kill() → force exit
+
+_caffeinate_proc: Optional[_subprocess.Popen] = None
+
+
+def _start_caffeinate() -> None:
+    """Spawn caffeinate to prevent macOS sleep while the engine is running.
+
+    Uses -dims flags: -d (display), -i (idle), -m (disk), -s (system sleep on AC).
+    No-op on non-macOS or if caffeinate is unavailable.
+    """
+    global _caffeinate_proc
+    if platform.system() != "Darwin":
+        logger.warning("[Engine] Sleep prevention unavailable (not macOS)")
+        return
+    try:
+        _caffeinate_proc = _subprocess.Popen(
+            ["caffeinate", "-dims"],
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+        )
+        logger.info("[Engine] caffeinate started (PID %d) — sleep prevention active", _caffeinate_proc.pid)
+    except FileNotFoundError:
+        logger.warning("[Engine] caffeinate not found — sleep prevention unavailable")
+    except Exception as exc:
+        logger.warning("[Engine] caffeinate failed to start: %s", exc)
+
+
+def _stop_caffeinate() -> None:
+    """Terminate the caffeinate process started by _start_caffeinate()."""
+    global _caffeinate_proc
+    if _caffeinate_proc is None:
+        return
+    try:
+        _caffeinate_proc.terminate()
+        _caffeinate_proc.wait(timeout=3)
+    except Exception:
+        try:
+            _caffeinate_proc.kill()
+        except Exception:
+            pass
+    _caffeinate_proc = None
+    logger.info("[Engine] caffeinate stopped — sleep prevention released")
 
 
 # ---------------------------------------------------------------------------
@@ -524,14 +616,19 @@ def _tick(scheduler: GammaExposureScheduler, pm: PositionManager, cfg, alpaca: A
     if api_err or result is None:
         # Check for 401 and attempt re-auth
         if api_err and "401" in str(api_err):
-            logger.warning("[Engine] 401 from API — attempting token refresh and retry")
+            logger.warning("[Engine] 401 from API — reloading Schwab client from token file")
             try:
-                GammaExposureScheduler._proactive_schwab_token_refresh(scheduler.client)
+                # Re-authenticate from disk rather than using the stale in-memory session.
+                # This handles the case where the token was refreshed externally (e.g. by
+                # re-running the manual OAuth flow) while the engine was running, which
+                # rotates the refresh token and invalidates the engine's in-memory copy.
+                scheduler.authenticate()
+                _apply_request_timeout(scheduler.client)
                 result, api_err = fetch_options_and_gex(
                     scheduler.client, cfg.spy_underlying, cfg.strike_count, _previous_gex, scheduler.client_module
                 )
             except Exception as exc:
-                logger.error("[Engine] Token refresh failed: %s", exc)
+                logger.error("[Engine] Re-auth failed: %s", exc)
                 return
             if api_err or result is None:
                 logger.error("[Engine] GEX fetch still failing after token refresh: %s", api_err)
@@ -674,6 +771,7 @@ def main() -> None:
     logger.info("[Engine] Authenticating to Schwab...")
     scheduler = GammaExposureScheduler()
     scheduler.authenticate()
+    _apply_request_timeout(scheduler.client)
     logger.info("[Engine] Schwab authentication successful.")
 
     # --- Alpaca connectivity check ---
@@ -744,74 +842,83 @@ def main() -> None:
     _signal.signal(_signal.SIGINT, _handle_sigint)
     _signal.signal(_signal.SIGTERM, _handle_sigint)
 
+    # --- Prevent macOS sleep for the duration of the engine run ---
+    _start_caffeinate()
+
     # --- Enter main loop ---
     set_engine_state("status", "running")
     logger.info("[Engine] Running. Press Ctrl+C to stop.")
 
-    while not _shutdown_requested:
-        # --- Poll control file ---
-        try:
-            if _CONTROL_FILE.exists():
-                cmd = _CONTROL_FILE.read_text().strip().lower()
-                _CONTROL_FILE.unlink(missing_ok=True)
-                if cmd == "close_all":
-                    logger.info("[Engine] close_all command received.")
-                    if not cfg.dry_run and pm.positions:
-                        try:
-                            alpaca.close_all_option_positions()
-                            logger.info("[Engine] Close-all orders submitted.")
-                        except Exception as exc:
-                            logger.error("[Engine] Close-all order failed: %s", exc)
-                    _flush_positions_to_journal(pm, "close_all_command")
-                    logger.info("[Engine] All positions flushed to journal.")
-                elif cmd == "stop":
-                    logger.info("[Engine] stop command received via control file.")
-                    _shutdown_requested = True
-        except Exception as exc:
-            logger.warning("[Engine] Control file error: %s", exc)
-
-        try:
-            cfg = load_config()
-            if args.dry_run:
-                cfg.dry_run = True
-            pm.cfg = cfg
-            _tick(scheduler, pm, cfg, alpaca)
-        except Exception as e:
-            logger.error("[Engine] Tick error: %s", e, exc_info=True)
-        time.sleep(cfg.poll_interval_seconds)
-
-    # --- Graceful shutdown ---
-    logger.info("[Engine] Shutting down...")
-
-    if pm.positions:
-        open_count = len(pm.positions)
-        if cfg.dry_run:
-            logger.warning(
-                "[Engine] %d open position(s) at shutdown (dry-run — no orders placed).", open_count
-            )
-        else:
-            logger.warning(
-                "[Engine] %d open position(s) at shutdown. Closing at market...", open_count
-            )
+    try:
+        while not _shutdown_requested:
+            # --- Poll control file ---
             try:
-                alpaca.close_all_option_positions()
-                logger.info("[Engine] Close-all orders submitted.")
+                if _CONTROL_FILE.exists():
+                    cmd = _CONTROL_FILE.read_text().strip().lower()
+                    _CONTROL_FILE.unlink(missing_ok=True)
+                    if cmd == "close_all":
+                        logger.info("[Engine] close_all command received.")
+                        if not cfg.dry_run and pm.positions:
+                            try:
+                                alpaca.close_all_option_positions()
+                                logger.info("[Engine] Close-all orders submitted.")
+                            except Exception as exc:
+                                logger.error("[Engine] Close-all order failed: %s", exc)
+                        _flush_positions_to_journal(pm, "close_all_command")
+                        logger.info("[Engine] All positions flushed to journal.")
+                    elif cmd == "stop":
+                        logger.info("[Engine] stop command received via control file.")
+                        _shutdown_requested = True
             except Exception as exc:
-                logger.error("[Engine] Failed to close positions during shutdown: %s", exc)
-        _flush_positions_to_journal(pm, "engine_shutdown")
+                logger.warning("[Engine] Control file error: %s", exc)
 
-    set_engine_state("status", "stopped")
-    compute_daily_summary(date.today().isoformat())
+            try:
+                cfg = load_config()
+                if args.dry_run:
+                    cfg.dry_run = True
+                pm.cfg = cfg
+                _tick(scheduler, pm, cfg, alpaca)
+            except Exception as e:
+                logger.error("[Engine] Tick error: %s", e, exc_info=True)
+            time.sleep(cfg.poll_interval_seconds)
 
-    total_pnl = round(pm.daily_realized_pnl, 2)
-    trades = pm.trades_today
-    logger.info(
-        "[Engine] Final summary — Trades today: %d | Realized P&L: $%.2f",
-        trades, total_pnl,
-    )
+    except Exception as _loop_exc:
+        logger.error("[Engine] Fatal loop error: %s", _loop_exc, exc_info=True)
 
-    _maybe_generate_eod_report(pm, cfg)
-    logger.info("[Engine] Stopped.")
+    finally:
+        # --- Graceful shutdown (runs on any exit path) ---
+        logger.info("[Engine] Shutting down...")
+
+        if pm.positions:
+            open_count = len(pm.positions)
+            if cfg.dry_run:
+                logger.warning(
+                    "[Engine] %d open position(s) at shutdown (dry-run — no orders placed).", open_count
+                )
+            else:
+                logger.warning(
+                    "[Engine] %d open position(s) at shutdown. Closing at market...", open_count
+                )
+                try:
+                    alpaca.close_all_option_positions()
+                    logger.info("[Engine] Close-all orders submitted.")
+                except Exception as exc:
+                    logger.error("[Engine] Failed to close positions during shutdown: %s", exc)
+            _flush_positions_to_journal(pm, "engine_shutdown")
+
+        set_engine_state("status", "stopped")
+        compute_daily_summary(date.today().isoformat())
+
+        total_pnl = round(pm.daily_realized_pnl, 2)
+        trades = pm.trades_today
+        logger.info(
+            "[Engine] Final summary — Trades today: %d | Realized P&L: $%.2f",
+            trades, total_pnl,
+        )
+
+        _maybe_generate_eod_report(pm, cfg)
+        _stop_caffeinate()
+        logger.info("[Engine] Stopped.")
 
 
 if __name__ == "__main__":
